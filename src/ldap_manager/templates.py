@@ -7,10 +7,16 @@ below. Allowed placeholders per kind are validated on save.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 from .config import Settings
 from .email import placeholders_in
+
+try:
+    import psycopg  # type: ignore
+except Exception:  # pragma: no cover
+    psycopg = None  # type: ignore
 
 NEW_USER = "new_user"
 ACCESS_GRANTED = "access_granted"
@@ -80,34 +86,82 @@ def validate(kind: str, subject: str, body: str) -> None:
         raise TemplateError("unsupported placeholders: " + ", ".join(sorted(unknown)))
 
 
-class TemplateStore:
-    """Postgres-backed per-tenant template store, with built-in defaults.
+_DDL = """
+CREATE TABLE IF NOT EXISTS email_templates (
+    tenant   TEXT NOT NULL,
+    kind     TEXT NOT NULL,
+    subject  TEXT NOT NULL,
+    body     TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, kind)
+)
+"""
 
-    Scaffold: the Postgres CRUD is sketched; when ``database_url`` is empty the
-    store serves only defaults (writes raise), so the app runs without a DB in dev.
+
+class TemplateStore:
+    """Postgres-backed per-tenant template store (§5.1), with built-in defaults.
+
+    A missing row falls back to the built-in default. When ``database_url`` is
+    empty the store serves only defaults and writes raise, so the app runs without
+    a DB in development.
     """
 
     def __init__(self, settings: Settings):
         self.s = settings
-        # TODO(scaffold): open a psycopg pool; ensure the email_templates table
-        # (tenant TEXT, kind TEXT, subject TEXT, body TEXT, PRIMARY KEY(tenant,kind)).
+        self._lock = threading.Lock()
+        self._ddl_done = False
 
     @property
     def enabled(self) -> bool:
-        return bool(self.s.database_url)
+        return bool(self.s.database_url) and psycopg is not None
+
+    def _connect(self):
+        if not self.enabled:
+            raise RuntimeError("template store (DATABASE_URL) not configured")
+        conn = psycopg.connect(self.s.database_url)
+        if not self._ddl_done:
+            with self._lock:
+                if not self._ddl_done:
+                    with conn.cursor() as cur:
+                        cur.execute(_DDL)
+                    conn.commit()
+                    self._ddl_done = True
+        return conn
 
     def get(self, tenant: str, kind: str) -> Template:
-        """Custom row if present, else the built-in default (marked not-customized)."""
-        # TODO(scaffold): SELECT subject, body FROM email_templates WHERE tenant,kind.
+        """Custom row if present, else the built-in default (not-customized)."""
+        if kind not in ALLOWED:
+            raise TemplateError(f"unknown template kind: {kind}")
+        if self.enabled:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT subject, body FROM email_templates WHERE tenant=%s AND kind=%s",
+                    (tenant, kind),
+                )
+                row = cur.fetchone()
+                if row:
+                    return Template(subject=row[0], body=row[1], customized=True)
         return DEFAULTS[kind]
 
     def put(self, tenant: str, kind: str, subject: str, body: str) -> None:
         validate(kind, subject, body)
-        if not self.enabled:
-            raise RuntimeError("template store (DATABASE_URL) not configured")
-        # TODO(scaffold): UPSERT into email_templates.
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO email_templates (tenant, kind, subject, body)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (tenant, kind)
+                DO UPDATE SET subject = EXCLUDED.subject, body = EXCLUDED.body,
+                              updated_at = now()
+                """,
+                (tenant, kind, subject, body),
+            )
+            conn.commit()
 
     def revert(self, tenant: str, kind: str) -> None:
-        """Delete the custom row → fall back to default."""
-        # TODO(scaffold): DELETE FROM email_templates WHERE tenant,kind.
-        return None
+        """Delete the custom row → fall back to default (no-op if none)."""
+        if not self.enabled:
+            return
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM email_templates WHERE tenant=%s AND kind=%s", (tenant, kind))
+            conn.commit()
