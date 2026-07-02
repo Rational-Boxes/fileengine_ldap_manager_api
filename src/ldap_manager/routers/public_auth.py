@@ -5,7 +5,9 @@ an address exists.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+import hashlib
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..deps import Services, services
 from ..schemas import InviteAccept, ResetConfirm, ResetRequest
@@ -41,13 +43,22 @@ def invite_accept(body: InviteAccept, svc: Services = Depends(services)) -> dict
 
 
 @router.post("/reset/request")
-def reset_request(body: ResetRequest, svc: Services = Depends(services)) -> dict:
-    """Always returns 200 (no account enumeration). Rate-limited per source/email.
-    TODO(scaffold): enforce rate-limit (Redis counter)."""
+def reset_request(body: ResetRequest, request: Request, svc: Services = Depends(services)) -> dict:
+    """Always returns 200 (no account enumeration). Rate-limited per source IP and
+    per email; over-limit requests are silently dropped (still 200) so a throttle
+    never leaks whether an address exists."""
+    s = svc.settings
+    email = str(body.email).lower()
+    ip = request.client.host if request.client else "unknown"
+    within_limits = (
+        svc.tokens.rate_ok(f"reset:ip:{ip}", s.reset_rate_per_ip, s.reset_rate_window_s)
+        and svc.tokens.rate_ok(f"reset:email:{hashlib.sha256(email.encode()).hexdigest()}",
+                               s.reset_rate_per_email, s.reset_rate_window_s)
+    )
     # Everything here is best-effort and errors are swallowed so the response is
     # identical whether or not the address exists (no account enumeration, §5.2).
     try:
-        user = svc.ldap.get_user(str(body.email))
+        user = svc.ldap.get_user(str(body.email)) if within_limits else None
         if user and svc.tokens.enabled and svc.mailer.enabled and svc.settings.reset_link_base:
             token = svc.tokens.issue(tok.RESET, user["uid"], svc.settings.reset_ttl_hours * 3600)
             tmpl = DEFAULTS[PASSWORD_RESET]  # system-level template (§5.2)

@@ -20,8 +20,7 @@ def readyz(response: Response, svc: Services = Depends(services)) -> dict:
         "bridge": svc.verifier.enabled,
         "redis": svc.tokens.enabled,
         "templates_db": svc.templates.enabled,
-        # TODO(scaffold): probe the LDAP master reachability here.
-        "ldap_master": True,
+        "ldap_master": svc.ldap.ping_master(),   # write path must be reachable (§1.1)
     }
     ready = all(checks.values())
     if not ready:

@@ -33,29 +33,65 @@ class TokenStore:
     def _key(self, kind: str, token: str) -> str:
         return f"ldapmgr:{kind}:{_hash(token)}"
 
+    def _uid_index(self, uid: str) -> str:
+        # Hashed so a Redis dump never exposes the address; indexes a user's live
+        # token keys for bulk revocation.
+        return f"ldapmgr:byuid:{_hash(uid)}"
+
     def issue(self, kind: str, uid: str, ttl_seconds: int) -> str:
-        """Mint a token for ``uid``, store ``hash → uid`` with TTL, return the raw
-        token (emailed to the user; never persisted in the clear)."""
+        """Mint a token for ``uid``, store ``hash → uid`` with TTL, index it under
+        the uid, and return the raw token (emailed; never persisted in the clear)."""
         token = secrets.token_urlsafe(32)
         if self._r is not None:
-            self._r.setex(self._key(kind, token), ttl_seconds, uid)
+            key = self._key(kind, token)
+            idx = self._uid_index(uid)
+            pipe = self._r.pipeline()
+            pipe.setex(key, ttl_seconds, uid)
+            pipe.sadd(idx, key)
+            # only extend the index's life so it outlives every live token for the uid
+            try:
+                pipe.expire(idx, ttl_seconds, gt=True)
+            except TypeError:  # redis-py without GT support
+                pipe.expire(idx, ttl_seconds)
+            pipe.execute()
         return token
 
     def consume(self, kind: str, token: str) -> Optional[str]:
-        """Validate + single-use: return the ``uid`` and delete the token, or None
-        if unknown/expired."""
+        """Validate + single-use: return the ``uid`` and delete the token (and its
+        index entry), or None if unknown/expired."""
         if self._r is None or not token:
             return None
         key = self._key(kind, token)
         uid = self._r.get(key)
         if uid is None:
             return None
-        self._r.delete(key)
-        return uid.decode("utf-8") if isinstance(uid, bytes) else str(uid)
+        uid = uid.decode("utf-8") if isinstance(uid, bytes) else str(uid)
+        pipe = self._r.pipeline()
+        pipe.delete(key)
+        pipe.srem(self._uid_index(uid), key)
+        pipe.execute()
+        return uid
 
     def revoke_all_for(self, uid: str) -> None:
-        """Invalidate any outstanding invite/reset tokens for a user after a
-        successful password set (§5.2). Scaffold: with hashed keys this needs a
-        per-uid index; TODO wire a secondary set ``ldapmgr:byuid:<uid>``."""
-        # TODO(scaffold): maintain a per-uid index set to enable bulk revocation.
-        return None
+        """Invalidate every outstanding invite/reset token for a user after a
+        successful password set (§5.2), via the per-uid index."""
+        if self._r is None:
+            return
+        idx = self._uid_index(uid)
+        keys = self._r.smembers(idx)
+        pipe = self._r.pipeline()
+        for k in keys:
+            pipe.delete(k)
+        pipe.delete(idx)
+        pipe.execute()
+
+    def rate_ok(self, bucket: str, limit: int, window_s: int) -> bool:
+        """Fixed-window rate limit: True if ``bucket`` is under ``limit`` in the
+        current ``window_s``. No-op (allow) when Redis is off or limit<=0."""
+        if self._r is None or limit <= 0:
+            return True
+        key = f"ldapmgr:rl:{bucket}"
+        n = self._r.incr(key)
+        if n == 1:
+            self._r.expire(key, window_s)
+        return n <= limit

@@ -96,6 +96,9 @@ class Settings:
     invite_ttl_hours: int = 72
     reset_link_base: str = ""
     reset_ttl_hours: int = 2
+    reset_rate_per_email: int = 5      # per window, per email
+    reset_rate_per_ip: int = 20        # per window, per source IP
+    reset_rate_window_s: int = 3600
 
     # --- password policy (§5.4) ---
     password_policy: PasswordPolicyConfig = field(default_factory=PasswordPolicyConfig)
@@ -137,6 +140,9 @@ def load_settings() -> "Settings":
         invite_ttl_hours=_int("INVITE_TTL_HOURS", 72),
         reset_link_base=_env("RESET_LINK_BASE", ""),
         reset_ttl_hours=_int("RESET_TTL_HOURS", 2),
+        reset_rate_per_email=_int("RESET_RATE_PER_EMAIL", 5),
+        reset_rate_per_ip=_int("RESET_RATE_PER_IP", 20),
+        reset_rate_window_s=_int("RESET_RATE_WINDOW_S", 3600),
         password_policy=PasswordPolicyConfig(
             min_length=_int("PW_MIN_LENGTH", 12),
             max_length=_int("PW_MAX_LENGTH", 128),

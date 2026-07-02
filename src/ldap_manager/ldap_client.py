@@ -127,6 +127,22 @@ class LdapClient:
         if not ok:
             raise LdapError(getattr(conn, "result", None))
 
+    def ping_master(self) -> bool:
+        """Cheap reachability probe of the writable master, for ``/readyz`` (§1.1).
+        Binds the service account; does not affect the failover breaker."""
+        if ldap3 is None:  # pragma: no cover
+            return False
+        try:
+            c = ldap3.Connection(
+                ldap3.Server(self.s.ldap_endpoint, get_info=ldap3.NONE, connect_timeout=3),
+                user=self.s.ldap_bind_dn, password=self.s.ldap_bind_password,
+                auto_bind=True, receive_timeout=5,
+            )
+            c.unbind()
+            return True
+        except Exception:
+            return False
+
     def _bind_as(self, dn: str, password: str) -> bool:
         """Verify a user's password by binding as them (change-password §5.3)."""
         if ldap3 is None or not password:  # pragma: no cover
