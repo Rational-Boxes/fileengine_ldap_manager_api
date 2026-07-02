@@ -214,6 +214,30 @@ available to all users, not just admins).
   caller's own DN**; a user can never read or edit another user through these
   routes.
 
+### 5.4 Password complexity policy (gating — every password-set path)
+
+One configurable policy is enforced **server-side** on all three paths that set a
+password — invite accept (§5-A / account creation), reset confirm (§5.2), and self
+change-password (§5.3) — so a weak password can never enter the directory. The
+same validator is shared by all three (no bypass).
+
+- **Rules (env-configurable):**
+  - length: `PW_MIN_LENGTH` (default 12), `PW_MAX_LENGTH` (default 128);
+  - character classes: `PW_REQUIRE_UPPER`, `PW_REQUIRE_LOWER`, `PW_REQUIRE_DIGIT`,
+    `PW_REQUIRE_SYMBOL` (each default true) — or `PW_MIN_CLASSES` to require N of
+    the four instead of specific ones;
+  - must not contain the account's `uid`/email local-part or display name;
+  - optional `PW_BLOCKLIST` (path to a common/breached-password list) — reject
+    exact matches.
+- **Enforcement:** validated **before any LDAP write**; on failure the endpoint
+  returns **`422`** with a machine-readable list of the *unmet* rules plus a human
+  message (never a vague "invalid password"). Change-password additionally
+  re-verifies the current password first (§5.3).
+- **Discovery for the UI:** `GET /v1/password-policy` (**public**) returns the
+  active rules so the set-password / reset / change-password forms can show a live
+  requirements checklist and validate client-side — the server stays
+  authoritative.
+
 ## 6. User lookup / privacy
 
 Because users are global, unrestricted listing would leak the whole directory
@@ -247,6 +271,7 @@ is capped + rate-limited. No full enumeration.
 | `POST /v1/invite/accept` `{token, password}` | **public** — set password from an invite |
 | `POST /v1/reset/request` `{email}` | **public** — request a password reset (always 200) |
 | `POST /v1/reset/confirm` `{token, password}` | **public** — set a new password from a reset token |
+| `GET /v1/password-policy` | **public** — active complexity rules (for live form validation, §5.4) |
 | `GET /healthz` · `GET /readyz` | monitoring (loopback-only) |
 
 ## 8. Configuration (env, mirrors CSAI; secrets via compose, never baked in)
@@ -276,6 +301,9 @@ tokens) · `DATABASE_URL` (Postgres — per-tenant email templates, §5.1) ·
 `SMTP_HOST/PORT/USER/PASSWORD/FROM` · `INVITE_LINK_BASE`, `INVITE_TTL_HOURS`
 (default 72) · `RESET_LINK_BASE`, `RESET_TTL_HOURS` (default 2) ·
 `LDAP_AVATAR_ATTR` (default `labeledURI` — self-service avatar link, §5.3) ·
+**Password policy (§5.4):** `PW_MIN_LENGTH` (12), `PW_MAX_LENGTH` (128),
+`PW_REQUIRE_UPPER/LOWER/DIGIT/SYMBOL` (true), `PW_MIN_CLASSES` (opt),
+`PW_BLOCKLIST` (opt) ·
 `HTTP_HOST` (default `127.0.0.1`), `HTTP_PORT` (default `8093`),
 `HTTP_MONITORING_HOST/PORT` (loopback). Frontend: `VITE_LDAPADMIN_BASE`
 (default `/ldapadmin`).
