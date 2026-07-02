@@ -72,10 +72,15 @@ roles of their own tenant, backing the frontend administrative interface.
   (the existing SPA session). The service introspects it via the bridge to
   resolve `{user, tenant, roles}` — trusted-upstream, exactly like CSAI. No new
   login surface.
-- **Authorization is app-enforced (decision):** for every request the service
-  verifies the caller is a `member` of `cn=administrators,ou=<tenant>,ou=tenants,…`
-  for the tenant in their token. All operations are hard-scoped to that tenant's
-  `ou` (and to global user entries); there is **no cross-tenant access**.
+- **Three authorization scopes (app-enforced):**
+  - **Public** (no token): `/v1/invite/accept`, `/v1/reset/request`,
+    `/v1/reset/confirm` — token-gated, rate-limited, no enumeration.
+  - **Self** (any valid bearer token): `/v1/me*` — the caller edits only **their
+    own** account (hard-scoped to their own DN); no admin role required.
+  - **Tenant admin** (`/v1/admin/*`): the caller must be a `member` of
+    `cn=administrators,ou=<tenant>,ou=tenants,…` for the tenant in their token;
+    every operation is hard-scoped to that tenant's `ou` (and global user entries)
+    — **no cross-tenant access**.
 - **Writes (decision):** performed with the **privileged service-bind account**
   — the same `FILEENGINE_LDAP_BIND_DN` / `FILEENGINE_LDAP_BIND_PASSWORD` the
   bridges use (§8) — writing only under `FILEENGINE_LDAP_USER_BASE` and
@@ -184,6 +189,31 @@ because this service owns directory `userPassword` writes. Public, unauthenticat
 - Writes target the LDAP **master** (§1.1); the reset link, like invites, points at
   the frontend (`RESET_LINK_BASE`).
 
+### 5.3 Self-service profile (non-admin — any authenticated user)
+
+Separate from the tenant-admin API: **any** user with a valid http_bridge bearer
+token may view and edit **their own** profile — the user in the token, no admin
+role, self only. Backs a profile page in the frontend (same `/ldapadmin` client,
+available to all users, not just admins).
+
+- **Editable fields**, on the caller's own `uid=<self>,${FILEENGINE_LDAP_USER_BASE}`:
+  - `display_name` → `displayName` (and keep `cn` in sync)
+  - `given_name` → `givenName`, `surname` → `sn`
+  - `avatar_url` → a **link** to an avatar image, stored in a configurable
+    attribute (`LDAP_AVATAR_ATTR`, default `labeledURI`; may need the
+    `labeledURIObject` aux objectClass). URL only — the service does not host
+    images; the frontend renders the linked icon.
+  - Read-only: `email`/`uid`, and tenant/role memberships.
+- **Change password** (authenticated, self): `POST /v1/me/password
+  {current_password, new_password}` — the service **verifies the current password
+  by binding to LDAP as the caller** with it, then sets `userPassword` (SSHA) on
+  the caller's entry. This is the authenticated change flow, distinct from the
+  forgotten-password reset (§5.2), and — like all password flows — applies to
+  OAuth/SSO users too (WebDAV, §5 note).
+- All profile writes go to the LDAP **master** (§1.1) and are **hard-scoped to the
+  caller's own DN**; a user can never read or edit another user through these
+  routes.
+
 ## 6. User lookup / privacy
 
 Because users are global, unrestricted listing would leak the whole directory
@@ -211,6 +241,9 @@ is capped + rate-limited. No full enumeration.
 | `DELETE /v1/admin/email-templates/{kind}` | revert to the built-in default |
 | `POST /v1/admin/email-templates/{kind}/preview` `{subject?, body?}` | render with sample data (no send) |
 | `POST /v1/admin/email-templates/{kind}/test` | send a test to the caller's own email |
+| `GET /v1/me` | **self** (any authenticated user) — own profile |
+| `PATCH /v1/me` `{display_name?, given_name?, surname?, avatar_url?}` | **self** — edit own account |
+| `POST /v1/me/password` `{current_password, new_password}` | **self** — change own password (verifies current) |
 | `POST /v1/invite/accept` `{token, password}` | **public** — set password from an invite |
 | `POST /v1/reset/request` `{email}` | **public** — request a password reset (always 200) |
 | `POST /v1/reset/confirm` `{token, password}` | **public** — set a new password from a reset token |
@@ -242,6 +275,7 @@ including replica + failover for parity.
 tokens) · `DATABASE_URL` (Postgres — per-tenant email templates, §5.1) ·
 `SMTP_HOST/PORT/USER/PASSWORD/FROM` · `INVITE_LINK_BASE`, `INVITE_TTL_HOURS`
 (default 72) · `RESET_LINK_BASE`, `RESET_TTL_HOURS` (default 2) ·
+`LDAP_AVATAR_ATTR` (default `labeledURI` — self-service avatar link, §5.3) ·
 `HTTP_HOST` (default `127.0.0.1`), `HTTP_PORT` (default `8093`),
 `HTTP_MONITORING_HOST/PORT` (loopback). Frontend: `VITE_LDAPADMIN_BASE`
 (default `/ldapadmin`).
