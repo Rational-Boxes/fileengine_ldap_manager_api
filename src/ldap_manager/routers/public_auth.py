@@ -18,6 +18,15 @@ from .. import tokens as tok
 router = APIRouter(prefix="/v1")
 
 
+def _client_ip(request: Request) -> str:
+    """Real client IP behind the nginx /ldapadmin proxy: first X-Forwarded-For
+    hop, then X-Real-IP, then the socket peer."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+
+
 @router.get("/password-policy")
 def password_policy(svc: Services = Depends(services)) -> dict:
     """Active complexity rules, so the set-password/reset/change forms can validate
@@ -49,7 +58,7 @@ def reset_request(body: ResetRequest, request: Request, svc: Services = Depends(
     never leaks whether an address exists."""
     s = svc.settings
     email = str(body.email).lower()
-    ip = request.client.host if request.client else "unknown"
+    ip = _client_ip(request)
     within_limits = (
         svc.tokens.rate_ok(f"reset:ip:{ip}", s.reset_rate_per_ip, s.reset_rate_window_s)
         and svc.tokens.rate_ok(f"reset:email:{hashlib.sha256(email.encode()).hexdigest()}",
