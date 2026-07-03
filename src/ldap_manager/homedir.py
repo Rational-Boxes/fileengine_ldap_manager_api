@@ -74,11 +74,21 @@ class HomeProvisioner:
         if not self.enabled:
             raise HomeProvisionError("BRIDGE_URL not configured")
 
+        # Find the top-level Users folder, creating it on first use. Creating in
+        # root needs system_admin, and the acting tenant admin is aliased to
+        # system_admin at the bridge, so this succeeds. Idempotent under races:
+        # if the create conflicts, re-find the folder.
         users_uid = self._find_child("root", USERS_FOLDER, token, tenant)
         if not users_uid:
-            raise HomeProvisionError(
-                f"'{USERS_FOLDER}' folder not found in tenant '{tenant}' "
-                "(a system_admin must create it once)")
+            status, data = self._request("POST", "/v1/dirs/root", token, tenant,
+                                         {"name": USERS_FOLDER})
+            if status == 201 and isinstance(data, dict):
+                users_uid = data.get("uid")
+            else:
+                users_uid = self._find_child("root", USERS_FOLDER, token, tenant)
+            if not users_uid:
+                raise HomeProvisionError(
+                    f"could not create '{USERS_FOLDER}' folder in tenant '{tenant}': {data}")
 
         # Create the home folder (idempotent: reuse an existing one).
         status, data = self._request("POST", f"/v1/dirs/{users_uid}", token, tenant,

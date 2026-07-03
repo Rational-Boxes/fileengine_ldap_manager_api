@@ -47,8 +47,23 @@ def test_idempotent_reuses_existing_home():
     assert hp.provision("tok", "acme", "alice@x") == "H"
 
 
-def test_missing_users_folder_raises():
-    hp = _provisioner([(200, {"entries": []})])  # no Users folder
+def test_creates_users_folder_when_missing():
+    hp = _provisioner(
+        [(200, {"entries": []}),   # find Users under root -> missing
+         (201, {"uid": "U"}),      # create Users
+         (201, {"uid": "H"})]      # mkdir the home folder
+        + [(204, None)] * len(FULL_CONTROL) + [(204, None)]  # grants + deny
+    )
+    assert hp.provision("tok", "acme", "alice@x") == "H"
+    assert hp.calls[1] == ("POST", "/v1/dirs/root", {"name": "Users"})  # created on first use
+
+
+def test_users_creation_failure_raises():
+    hp = _provisioner([
+        (200, {"entries": []}),      # no Users
+        (403, {"error": "denied"}),  # create Users fails
+        (200, {"entries": []}),      # re-find still missing
+    ])
     with pytest.raises(HomeProvisionError):
         hp.provision("tok", "acme", "alice@x")
 
