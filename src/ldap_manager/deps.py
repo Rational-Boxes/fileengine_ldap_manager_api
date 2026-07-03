@@ -11,6 +11,7 @@ from fastapi import Depends, Header, HTTPException, Request
 from .bridge_auth import BridgeTokenVerifier
 from .config import Settings
 from .email import Mailer
+from .homedir import HomeProvisioner
 from .identity import Identity
 from .ldap_client import LdapClient
 from .password_policy import PasswordPolicy
@@ -27,6 +28,7 @@ class Services:
     mailer: Mailer
     templates: TemplateStore
     policy: PasswordPolicy
+    home: HomeProvisioner
 
 
 def services(request: Request) -> Services:
@@ -37,6 +39,12 @@ def _bearer(authorization: str | None) -> str:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     return authorization.split(" ", 1)[1].strip()
+
+
+def bearer_token(authorization: str | None = Header(default=None)) -> str:
+    """The caller's raw bearer token — forwarded to the bridge to provision a home
+    folder under the admin's own authority."""
+    return _bearer(authorization)
 
 
 def require_identity(

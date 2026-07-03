@@ -5,10 +5,14 @@ sets it (subject to the password policy at accept time).
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ..deps import Services, require_tenant_admin, services
+from ..deps import Services, bearer_token, require_tenant_admin, services
 from ..identity import Identity
+
+log = logging.getLogger("ldap_manager.users")
 from ..schemas import UserCreate, UserOut
 from ..templates import NEW_USER
 from .. import email as email_mod
@@ -41,15 +45,25 @@ def get_user(uid: str, svc: Services = Depends(services), ident: Identity = Depe
 
 
 @router.post("", response_model=UserOut, status_code=201)
-def create_user(body: UserCreate, svc: Services = Depends(services), ident: Identity = Depends(require_tenant_admin)):
-    """Create a new global user (pending, no password) + assign roles + send the
-    invite. If the user already exists this is a 409 — use role assignment instead."""
+def create_user(body: UserCreate, svc: Services = Depends(services),
+                ident: Identity = Depends(require_tenant_admin),
+                token: str = Depends(bearer_token)):
+    """Create a new global user (pending, no password) + assign roles + provision a
+    private home folder + send the invite. If the user already exists this is a 409
+    — use role assignment instead."""
     email = str(body.email)
     if svc.ldap.get_user(email):
         raise HTTPException(status_code=409, detail="user already exists; assign them to a role instead")
     svc.ldap.create_user(email, email, body.display_name)
     for role in body.roles:
         svc.ldap.add_member(ident.tenant, role, email)
+    # Private home folder under Users/<uid> (full access to the user, denied to
+    # everyone else). Best-effort under the admin's authority — a filesystem hiccup
+    # must not undo the created user.
+    try:
+        svc.home.provision(token, ident.tenant, email)
+    except Exception as e:
+        log.warning("home folder provisioning failed for %s in %s: %s", email, ident.tenant, e)
     _send_invite(svc, ident, email, body.display_name, body.roles)
     return UserOut(uid=email, email=email, display_name=body.display_name, in_this_tenant=bool(body.roles))
 

@@ -11,6 +11,7 @@ from .bridge_auth import BridgeTokenVerifier
 from .config import Settings, load_settings
 from .deps import Services
 from .email import Mailer
+from .homedir import HomeProvisioner
 from .ldap_client import LdapClient, LdapError, MasterUnavailable
 from .password_policy import PasswordPolicy
 from .templates import TemplateStore
@@ -28,6 +29,7 @@ def build_services(settings: Settings) -> Services:
         mailer=Mailer(settings),
         templates=TemplateStore(settings),
         policy=PasswordPolicy(settings.password_policy),
+        home=HomeProvisioner(settings.bridge_url),
     )
 
 
