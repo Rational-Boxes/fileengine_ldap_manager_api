@@ -83,6 +83,7 @@ class Settings:
     # --- service integrations ---
     bridge_url: str = ""          # http_bridge, for token introspection (§2)
     bridge_introspect_ttl: int = 60
+    jwt_secret: str = ""          # shared HS256 secret to verify bearer JWTs locally
     redis_url: str = ""           # invite + reset tokens
     database_url: str = ""        # Postgres — per-tenant email templates (§5.1)
 
@@ -128,6 +129,7 @@ def load_settings() -> "Settings":
         ldap_tenant_base=_env("FILEENGINE_LDAP_TENANT_BASE", "ou=tenants,dc=rationalboxes,dc=com"),
         ldap_avatar_attr=_env("LDAP_AVATAR_ATTR", "labeledURI"),
         bridge_url=_env("BRIDGE_URL", ""),
+        jwt_secret=_env("FILEENGINE_JWT_SECRET", ""),
         bridge_introspect_ttl=_int("BRIDGE_INTROSPECT_TTL", 60),
         redis_url=_env("REDIS_URL", ""),
         database_url=_env("DATABASE_URL", ""),

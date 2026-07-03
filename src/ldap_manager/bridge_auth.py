@@ -12,23 +12,41 @@ import urllib.request
 from typing import Optional
 
 from .identity import Identity
+from .jwt_verify import identity_from_claims, verify_hs256
 
 
 class BridgeTokenVerifier:
-    def __init__(self, base_url: str, ttl_seconds: int = 60, timeout: float = 3.0):
+    def __init__(self, base_url: str, ttl_seconds: int = 60, timeout: float = 3.0,
+                 jwt_secret: str = ""):
         self.base_url = (base_url or "").rstrip("/")
         self.ttl = ttl_seconds
         self.timeout = timeout
+        self.jwt_secret = jwt_secret or ""
         self._lock = threading.Lock()
         self._cache: dict[tuple[str, str], tuple[Identity, float]] = {}
 
     @property
     def enabled(self) -> bool:
-        return bool(self.base_url)
+        # Verifiable if we can check signatures locally OR reach the bridge.
+        return bool(self.jwt_secret) or bool(self.base_url)
 
     def verify(self, token: str, tenant: str) -> Optional[Identity]:
-        if not self.enabled or not token:
+        if not token or not self.enabled:
             return None
+        # Local HS256 verification (the bridge's signed JWT) — no round-trip.
+        if self.jwt_secret:
+            claims = verify_hs256(token, self.jwt_secret)
+            if claims is not None:
+                got = identity_from_claims(claims, tenant)
+                if got is not None:
+                    user, roles = got
+                    return Identity(user=user, roles=roles,
+                                    tenant=tenant or claims.get("tenant", "default"))
+                return None
+            # A configured secret that fails to verify means an invalid/expired
+            # token — do NOT silently fall back to introspection.
+            return None
+        # No shared secret configured: fall back to bridge introspection (cached).
         key = (token, tenant)
         now = time.time()
         with self._lock:

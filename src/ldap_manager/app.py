@@ -21,7 +21,8 @@ from .routers import admin_roles, admin_templates, admin_users, health, me, publ
 def build_services(settings: Settings) -> Services:
     return Services(
         settings=settings,
-        verifier=BridgeTokenVerifier(settings.bridge_url, settings.bridge_introspect_ttl),
+        verifier=BridgeTokenVerifier(settings.bridge_url, settings.bridge_introspect_ttl,
+                                     jwt_secret=settings.jwt_secret),
         ldap=LdapClient(settings),
         tokens=TokenStore(settings.redis_url),
         mailer=Mailer(settings),
