@@ -2,7 +2,7 @@
 name = "fileengine-ldap-manager"
 version = "0.1.0"
 description = "FileEngine tenant user & role administration API (LDAP) + self-service profile/password"
-license = {text = "GPL-3.0-or-later"}
+license = {text = "AGPL-3.0-or-later"}
 authors = [{name = "James Hickman", email = "james@rationalboxes.com"}]
 requires-python = ">=3.10"
 dependencies = [
