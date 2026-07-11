@@ -23,6 +23,11 @@ def list_roles(svc: Services = Depends(services), ident: Identity = Depends(requ
 
 @router.post("", response_model=RoleOut, status_code=201)
 def create_role(body: RoleCreate, svc: Services = Depends(services), ident: Identity = Depends(require_tenant_admin)):
+    # Fail-closed write-ahead (§6): record the privilege change before it applies.
+    if not svc.audit.emit(category="user", action="role_create", outcome="ok",
+                          actor=ident.user, tenant=ident.tenant, target_uid=body.name,
+                          target_type="role"):
+        raise HTTPException(status_code=503, detail="audit log unavailable")
     svc.ldap.create_role(ident.tenant, body.name)
     return RoleOut(name=body.name, dn=svc.ldap.role_dn(ident.tenant, body.name), member_count=0)
 
@@ -31,6 +36,10 @@ def create_role(body: RoleCreate, svc: Services = Depends(services), ident: Iden
 def delete_role(role: str, svc: Services = Depends(services), ident: Identity = Depends(require_tenant_admin)):
     if role == ADMINS:
         raise HTTPException(status_code=400, detail="the administrators group cannot be deleted")
+    if not svc.audit.emit(category="user", action="role_delete", outcome="ok",
+                          actor=ident.user, tenant=ident.tenant, target_uid=role,
+                          target_type="role"):
+        raise HTTPException(status_code=503, detail="audit log unavailable")
     svc.ldap.delete_role(ident.tenant, role)
 
 
@@ -43,6 +52,10 @@ def list_members(role: str, svc: Services = Depends(services), ident: Identity =
 def add_member(role: str, body: MemberAdd, svc: Services = Depends(services), ident: Identity = Depends(require_tenant_admin)):
     # First membership in this tenant → access_granted email (§5-B).
     first_grant = not svc.ldap.is_tenant_member(body.uid, ident.tenant)
+    if not svc.audit.emit(category="user", action="role_assign_user", outcome="ok",
+                          actor=ident.user, tenant=ident.tenant, target_uid=body.uid,
+                          target_type="principal", detail={"role": role}):
+        raise HTTPException(status_code=503, detail="audit log unavailable")
     svc.ldap.add_member(ident.tenant, role, body.uid)
     if first_grant:
         _notify_access_granted(svc, ident, body.uid, role)
@@ -56,6 +69,10 @@ def remove_member(role: str, uid: str, svc: Services = Depends(services), ident:
         members = svc.ldap.list_members(ident.tenant, ADMINS)
         if len(members) <= 1:
             raise HTTPException(status_code=400, detail="cannot remove the last administrator")
+    if not svc.audit.emit(category="user", action="role_remove_user", outcome="ok",
+                          actor=ident.user, tenant=ident.tenant, target_uid=uid,
+                          target_type="principal", detail={"role": role}):
+        raise HTTPException(status_code=503, detail="audit log unavailable")
     svc.ldap.remove_member(ident.tenant, role, uid)
 
 

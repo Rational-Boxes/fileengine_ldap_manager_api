@@ -36,6 +36,11 @@ def update_me(
 ) -> ProfileOut:
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     svc.ldap.update_profile(ident.user, **fields)   # master write, own DN only
+    # Best-effort: a self-service profile edit is a low-stakes cosmetic change.
+    # Record which fields changed, not their (possibly PII) values.
+    svc.audit.emit(category="user", action="profile_update", outcome="ok", actor=ident.user,
+                   tenant=ident.tenant, target_uid=ident.user, target_type="principal",
+                   detail={"fields": sorted(fields.keys())})
     return get_me(svc, ident)
 
 

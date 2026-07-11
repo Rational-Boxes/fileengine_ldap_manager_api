@@ -56,11 +56,12 @@ class AuditEmitter:
     def enabled(self) -> bool:
         return self._pub is not None
 
-    def emit(self, *, action: str, outcome: str, actor: str, **fields) -> bool:
+    def emit(self, *, action: str, outcome: str, actor: str, category: str = "auth",
+             **fields) -> bool:
         if self._pub is None:
             return True  # disabled -> never blocks the guarded operation
         try:
-            return self._pub.publish(category="auth", action=action, outcome=outcome,
+            return self._pub.publish(category=category, action=action, outcome=outcome,
                                      actor=actor, source_iface=self.iface, **fields)
         except Exception:
             log.exception("audit emit failed for action=%s", action)

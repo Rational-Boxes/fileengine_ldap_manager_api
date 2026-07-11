@@ -54,6 +54,12 @@ def create_user(body: UserCreate, svc: Services = Depends(services),
     email = str(body.email)
     if svc.ldap.get_user(email):
         raise HTTPException(status_code=409, detail="user already exists; assign them to a role instead")
+    # Fail-closed write-ahead (§6): record the user creation (+ its role grants)
+    # before the directory is mutated.
+    if not svc.audit.emit(category="user", action="user_create", outcome="ok",
+                          actor=ident.user, tenant=ident.tenant, target_uid=email,
+                          target_type="principal", detail={"roles": list(body.roles)}):
+        raise HTTPException(status_code=503, detail="audit log unavailable")
     svc.ldap.create_user(email, email, body.display_name)
     for role in body.roles:
         svc.ldap.add_member(ident.tenant, role, email)
@@ -73,6 +79,9 @@ def reinvite(uid: str, svc: Services = Depends(services), ident: Identity = Depe
     u = svc.ldap.get_user(uid)
     if not u:
         raise HTTPException(status_code=404, detail="user not found")
+    # Best-effort: re-sending an invite is a notification, not a directory change.
+    svc.audit.emit(category="user", action="invite_send", outcome="ok", actor=ident.user,
+                   tenant=ident.tenant, target_uid=uid, target_type="principal")
     _send_invite(svc, ident, uid, u.get("display_name", uid), [])
 
 
