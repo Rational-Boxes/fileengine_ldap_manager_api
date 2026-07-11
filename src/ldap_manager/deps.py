@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from fastapi import Depends, Header, HTTPException, Request
 
+from .audit import AuditEmitter
 from .bridge_auth import BridgeTokenVerifier
 from .config import Settings
 from .email import Mailer
@@ -29,6 +30,7 @@ class Services:
     templates: TemplateStore
     policy: PasswordPolicy
     home: HomeProvisioner
+    audit: AuditEmitter
 
 
 def services(request: Request) -> Services:

@@ -7,6 +7,7 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from .audit import AuditEmitter
 from .bridge_auth import BridgeTokenVerifier
 from .config import Settings, load_settings
 from .deps import Services
@@ -30,6 +31,7 @@ def build_services(settings: Settings) -> Services:
         templates=TemplateStore(settings),
         policy=PasswordPolicy(settings.password_policy),
         home=HomeProvisioner(settings.bridge_url),
+        audit=AuditEmitter(settings.audit_enabled),
     )
 
 

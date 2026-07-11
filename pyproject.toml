@@ -13,6 +13,10 @@ dependencies = [
     "psycopg[binary]>=3.1",   # per-tenant email templates (§5.1)
     "redis>=5.0",             # invite + reset tokens (§5, §5.2)
 ]
+# The audit publisher (`audit_service.publisher`, from ../audit_service — the
+# fileengine_security_event_logger repo) is used for auth-category audit emission
+# when FILEENGINE_AUDIT_ENABLED is set. Install it (`pip install ../audit_service`)
+# or rely on the sibling-checkout bootstrap in ldap_manager.audit.
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "httpx>=0.27"]

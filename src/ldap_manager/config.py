@@ -87,6 +87,11 @@ class Settings:
     redis_url: str = ""           # invite + reset tokens
     database_url: str = ""        # Postgres — per-tenant email templates (§5.1)
 
+    # --- audit (usage_logging_and_auditing §5) — auth-category emission to the
+    # shared security-event sink. Connection comes from the publisher's own
+    # FILEENGINE_REDIS_*/AUDIT_STREAM env (the shared broker), not redis_url. ---
+    audit_enabled: bool = False
+
     # --- email / invites / reset (§5) ---
     smtp_host: str = ""
     smtp_port: int = 587
@@ -133,6 +138,7 @@ def load_settings() -> "Settings":
         bridge_introspect_ttl=_int("BRIDGE_INTROSPECT_TTL", 60),
         redis_url=_env("REDIS_URL", ""),
         database_url=_env("DATABASE_URL", ""),
+        audit_enabled=_env("FILEENGINE_AUDIT_ENABLED", "").strip().lower() in ("1", "true", "yes", "on"),
         smtp_host=_env("SMTP_HOST", ""),
         smtp_port=_int("SMTP_PORT", 587),
         smtp_user=_env("SMTP_USER", ""),
