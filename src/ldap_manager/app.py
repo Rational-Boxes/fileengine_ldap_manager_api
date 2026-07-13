@@ -35,6 +35,28 @@ def build_services(settings: Settings) -> Services:
     )
 
 
+def _install_monitoring_allowlist(app: FastAPI) -> None:
+    """Route-scoped IP allowlist for the unauthenticated monitoring endpoints
+    (security review L2). The endpoints already bind loopback; when
+    FILEENGINE_MONITORING_ALLOW_IPS is set (comma-separated client IPs), a request
+    to a monitoring path from a non-listed address is refused with 403. Empty =
+    allow any host that reaches the bound address."""
+    import os
+    from fastapi.responses import JSONResponse
+
+    monitor_paths = {"/healthz", "/readyz", "/poolz"}
+    allow = {ip.strip() for ip in
+             os.environ.get("FILEENGINE_MONITORING_ALLOW_IPS", "").split(",") if ip.strip()}
+
+    @app.middleware("http")
+    async def _guard_monitoring(request, call_next):
+        if allow and request.url.path in monitor_paths:
+            client = request.client.host if request.client else ""
+            if client not in allow:
+                return JSONResponse({"error": "forbidden"}, status_code=403)
+        return await call_next(request)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     app = FastAPI(
@@ -42,6 +64,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version="0.1.0",
         description="Tenant user & role administration, self-service profile/password, invite/reset.",
     )
+    _install_monitoring_allowlist(app)
     app.state.services = build_services(settings)
 
     _LDAP_HTTP = {"entryAlreadyExists": 409, "noSuchObject": 404,
