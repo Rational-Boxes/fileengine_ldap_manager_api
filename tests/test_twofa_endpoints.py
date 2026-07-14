@@ -114,10 +114,10 @@ def test_full_totp_lifecycle(client):
     # internal: required? -> yes (enabled)
     r = client.post("/internal/2fa/required", headers=_internal(),
                     json={"uid": UID, "tenant": TENANT})
-    # Per-user enrollment shows enabled; `required` follows the tenant policy —
-    # TENANT has no requirement, so enrollment alone does not force a challenge.
+    # Voluntary enrollment is honored: an enrolled user is challenged (required)
+    # everywhere, even though TENANT itself does not mandate 2FA (tenant_requires).
     assert r.status_code == 200 and r.json()["enabled"] is True
-    assert r.json()["required"] is False and r.json()["tenant_requires"] is False
+    assert r.json()["required"] is True and r.json()["tenant_requires"] is False
 
     # internal verify: correct TOTP -> ok
     code = twofa.totp_at(secret, time.time())

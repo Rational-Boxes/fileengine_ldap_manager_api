@@ -160,12 +160,14 @@ class VerifyIn(BaseModel):
 @router.post("/internal/2fa/required")
 def internal_required(body: UserTenantIn, svc: Services = Depends(services),
                       _: None = Depends(require_internal)) -> dict:
-    # 2FA is challenged when the ACTIVE TENANT requires it (per-tenant policy);
-    # enrollment is per-user. `tenant_requires` lets the bridge enforce the same
-    # rule on tenant switches (a non-2FA session entering a requiring tenant).
-    requires = _required(svc, body.tenant)
-    enabled = svc.twofa.is_enabled(body.uid)          # per-user, tenant-independent
-    return {"required": requires, "enabled": enabled,
+    # 2FA is challenged when the user has VOLUNTARILY enrolled (per-user, honored
+    # everywhere) OR the ACTIVE TENANT mandates it (per-tenant policy). The mandate
+    # is reported separately as `tenant_requires` so the bridge can enforce it on a
+    # tenant switch (an un-enrolled, password-only session entering a mandating
+    # tenant must re-login and enroll).
+    requires = _required(svc, body.tenant)            # tenant mandate (policy OR env)
+    enabled = svc.twofa.is_enabled(body.uid)          # per-user enrollment (any tenant)
+    return {"required": enabled or requires, "enabled": enabled,
             "must_enroll": requires and not enabled,
             "tenant_requires": requires,
             "methods": _effective_methods(svc, body.tenant)}
