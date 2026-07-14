@@ -92,6 +92,15 @@ class Settings:
     # FILEENGINE_REDIS_*/AUDIT_STREAM env (the shared broker), not redis_url. ---
     audit_enabled: bool = False
 
+    # --- two-factor auth (PROPOSAL §4) ---
+    mfa_enabled: bool = False
+    totp_secret_key: str = ""                 # base64 urlsafe 32-byte Fernet key; encrypts TOTP secrets at rest
+    mfa_allowed_methods: str = "totp,email"   # deployment-wide method cap (§4.8)
+    totp_required_tenants: str = ""           # comma-separated tenants whose users must enroll
+    mfa_email_ttl_s: int = 300                # email one-time-code lifetime
+    mfa_rate_per_ip: int = 5                  # 2FA attempts per window per source IP
+    mfa_rate_window_s: int = 300
+
     # --- email / invites / reset (§5) ---
     smtp_host: str = ""
     smtp_port: int = 587
@@ -139,6 +148,13 @@ def load_settings() -> "Settings":
         redis_url=_env("REDIS_URL", ""),
         database_url=_env("DATABASE_URL", ""),
         audit_enabled=_env("FILEENGINE_AUDIT_ENABLED", "").strip().lower() in ("1", "true", "yes", "on"),
+        mfa_enabled=_bool("MFA_ENABLED", False),
+        totp_secret_key=_env("TOTP_SECRET_KEY", ""),
+        mfa_allowed_methods=_env("MFA_ALLOWED_METHODS", "totp,email"),
+        totp_required_tenants=_env("TOTP_REQUIRED_TENANTS", ""),
+        mfa_email_ttl_s=_int("MFA_EMAIL_TTL_S", 300),
+        mfa_rate_per_ip=_int("MFA_RATE_PER_IP", 5),
+        mfa_rate_window_s=_int("MFA_RATE_WINDOW_S", 300),
         smtp_host=_env("SMTP_HOST", ""),
         smtp_port=_int("SMTP_PORT", 587),
         smtp_user=_env("SMTP_USER", ""),
