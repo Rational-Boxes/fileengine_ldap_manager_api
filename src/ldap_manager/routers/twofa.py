@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from .. import email as email_mod
 from .. import twofa
-from ..deps import Services, require_identity, services
+from ..deps import Services, require_identity, require_tenant_admin, services
 from ..identity import Identity
 from ..netutil import client_ip
 from ..templates import TWO_FA_EMAIL
@@ -29,14 +29,28 @@ router = APIRouter()
 ISSUER = "FileEngine"
 
 
-def _effective_methods(svc: Services) -> list[str]:
-    # A per-tenant restriction is a future admin toggle; for now the deployment
-    # cap applies to every tenant (PROPOSAL §4.8).
+def _deployment_cap(svc: Services) -> list[str]:
+    """The deployment-wide method cap (MFA_ALLOWED_METHODS) — the ceiling a tenant
+    admin can restrict within, never exceed (PROPOSAL §4.8)."""
     return twofa.effective_methods(twofa.parse_methods(svc.settings.mfa_allowed_methods), None)
 
 
-def _required_tenants(svc: Services) -> set[str]:
+def _effective_methods(svc: Services, tenant: str) -> list[str]:
+    """The methods a tenant actually permits: deployment cap ∩ the tenant policy
+    (a tenant with no policy inherits the full cap). (PROPOSAL §4.8)"""
+    pol = svc.twofa_policy.get(tenant)
+    return twofa.effective_methods(twofa.parse_methods(svc.settings.mfa_allowed_methods),
+                                   pol.allowed_methods)
+
+
+def _env_required_tenants(svc: Services) -> set[str]:
     return {t.strip() for t in (svc.settings.totp_required_tenants or "").split(",") if t.strip()}
+
+
+def _required(svc: Services, tenant: str) -> bool:
+    """Whether 2FA is mandatory for the tenant — the deployment env list
+    (TOTP_REQUIRED_TENANTS) OR the tenant admin's stored policy."""
+    return tenant in _env_required_tenants(svc) or svc.twofa_policy.get(tenant).require
 
 
 # ------------------------------ self-service ---------------------------------
@@ -50,13 +64,13 @@ def status(svc: Services = Depends(services), ident: Identity = Depends(require_
     st = svc.twofa.status(ident.tenant, ident.user)
     return {"enabled": st.enabled, "pending": st.pending,
             "recovery_remaining": st.recovery_remaining,
-            "required": ident.tenant in _required_tenants(svc),
-            "methods": _effective_methods(svc)}
+            "required": _required(svc, ident.tenant),
+            "methods": _effective_methods(svc, ident.tenant)}
 
 
 @router.post("/v1/me/2fa/setup")
 def setup(svc: Services = Depends(services), ident: Identity = Depends(require_identity)) -> dict:
-    if "totp" not in _effective_methods(svc):
+    if "totp" not in _effective_methods(svc, ident.tenant):
         raise HTTPException(status_code=403, detail="TOTP is not permitted for this tenant")
     if not svc.settings.totp_secret_key:
         raise HTTPException(status_code=503, detail="2FA is not configured (TOTP_SECRET_KEY unset)")
@@ -138,9 +152,9 @@ class VerifyIn(BaseModel):
 def internal_required(body: UserTenantIn, svc: Services = Depends(services),
                       _: None = Depends(require_internal)) -> dict:
     enabled = svc.twofa.is_enabled(body.tenant, body.uid)
-    must_enroll = (body.tenant in _required_tenants(svc)) and not enabled
+    must_enroll = _required(svc, body.tenant) and not enabled
     return {"required": enabled or must_enroll, "enabled": enabled,
-            "must_enroll": must_enroll, "methods": _effective_methods(svc)}
+            "must_enroll": must_enroll, "methods": _effective_methods(svc, body.tenant)}
 
 
 @router.post("/internal/2fa/verify")
@@ -152,7 +166,7 @@ def internal_verify(body: VerifyIn, request: Request, svc: Services = Depends(se
             and svc.tokens.rate_ok(f"2fa:uid:{body.uid}", s.mfa_rate_per_ip, s.mfa_rate_window_s)):
         raise HTTPException(status_code=429, detail="too many attempts")
     method = body.method.lower()
-    if method not in _effective_methods(svc) and method != "recovery":
+    if method not in _effective_methods(svc, body.tenant) and method != "recovery":
         raise HTTPException(status_code=400, detail="method not permitted")
     ok = False
     if method == "totp":
@@ -170,7 +184,7 @@ def internal_verify(body: VerifyIn, request: Request, svc: Services = Depends(se
 @router.post("/internal/2fa/email-challenge")
 def internal_email_challenge(body: UserTenantIn, svc: Services = Depends(services),
                              _: None = Depends(require_internal)) -> dict:
-    if "email" not in _effective_methods(svc):
+    if "email" not in _effective_methods(svc, body.tenant):
         raise HTTPException(status_code=403, detail="email 2FA is not permitted")
     code = f"{secrets.randbelow(1_000_000):06d}"
     svc.tokens.issue_code("2fa_email", body.uid, code, svc.settings.mfa_email_ttl_s)
@@ -188,3 +202,62 @@ def internal_email_challenge(body: UserTenantIn, svc: Services = Depends(service
     svc.audit.emit(action="2fa_challenge", outcome="ok" if sent else "error",
                    actor=body.uid, tenant=body.tenant, detail={"method": "email"})
     return {"sent": sent}
+
+
+# ------------------------------ tenant-admin policy --------------------------
+# A tenant admin sets which 2FA methods their tenant permits (a subset of the
+# deployment cap — e.g. disable weaker email recovery for a security-critical
+# tenant) and whether 2FA is required for members (PROPOSAL §4.8).
+
+class PolicyIn(BaseModel):
+    # A subset of the deployment methods the tenant permits. Omit/null = inherit
+    # the full deployment cap (no extra restriction).
+    allowed_methods: list[str] | None = None
+    require: bool = False
+
+
+@router.get("/v1/admin/2fa-policy")
+def get_policy(svc: Services = Depends(services),
+               ident: Identity = Depends(require_tenant_admin)) -> dict:
+    cap = _deployment_cap(svc)
+    pol = svc.twofa_policy.get(ident.tenant)
+    return {
+        "deployment_methods": cap,                              # the ceiling (checkbox choices)
+        "allowed_methods": _effective_methods(svc, ident.tenant),  # what's in force now
+        "require": pol.require,                                 # tenant policy toggle
+        "required_by_deployment": ident.tenant in _env_required_tenants(svc),  # env-forced (locked on)
+    }
+
+
+@router.put("/v1/admin/2fa-policy")
+def put_policy(body: PolicyIn, svc: Services = Depends(services),
+               ident: Identity = Depends(require_tenant_admin)) -> dict:
+    cap = _deployment_cap(svc)
+    # Normalize + validate the selection against the deployment cap.
+    if body.allowed_methods is None:
+        chosen = list(cap)          # inherit-everything
+    else:
+        chosen = [m.strip().lower() for m in body.allowed_methods if m.strip()]
+        bad = [m for m in chosen if m not in cap]
+        if bad:
+            raise HTTPException(status_code=400,
+                                detail=f"methods not permitted by this deployment: {', '.join(bad)}")
+    # A required tenant must keep at least one usable method, else members could
+    # never satisfy the mandate.
+    if body.require and not chosen:
+        raise HTTPException(status_code=400,
+                            detail="cannot require 2FA while allowing no methods")
+    # Store None (inherit) when the tenant allows the full cap, so it tracks future
+    # deployment-cap changes; otherwise store the explicit restricted list.
+    to_store = None if set(chosen) >= set(cap) else chosen
+    if not svc.audit.emit(category="admin", action="2fa_policy_update", outcome="ok",
+                          actor=ident.user, tenant=ident.tenant,
+                          detail={"allowed_methods": chosen, "require": body.require}):
+        raise HTTPException(status_code=503, detail="audit log unavailable")
+    svc.twofa_policy.set(ident.tenant, to_store, body.require)
+    return {
+        "deployment_methods": cap,
+        "allowed_methods": _effective_methods(svc, ident.tenant),
+        "require": svc.twofa_policy.get(ident.tenant).require,
+        "required_by_deployment": ident.tenant in _env_required_tenants(svc),
+    }

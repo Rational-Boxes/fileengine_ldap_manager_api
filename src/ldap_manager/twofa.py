@@ -246,3 +246,80 @@ class TwoFactorStore:
                     conn.commit()
                     return True
         return False
+
+
+# --------------------------- per-tenant policy (§4.8) ------------------------
+
+_POLICY_DDL = """
+CREATE TABLE IF NOT EXISTS tenant_2fa_policy (
+    tenant          TEXT PRIMARY KEY,
+    allowed_methods JSONB,               -- NULL = inherit the deployment cap
+    require_2fa     BOOLEAN NOT NULL DEFAULT false,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+
+@dataclass
+class TenantPolicy:
+    # None => the tenant inherits the deployment cap (no extra restriction).
+    allowed_methods: Optional[list[str]]
+    require: bool
+
+
+class TwoFactorPolicyStore:
+    """A tenant admin's 2FA policy: which methods the tenant permits (a subset of
+    the deployment cap — e.g. disable weaker email recovery for a critical tenant)
+    and whether 2FA is required for its members (PROPOSAL §4.8). Mirrors the
+    lazy-DDL pattern; serves an inherit-everything default with no DB."""
+
+    def __init__(self, settings):
+        self.s = settings
+        self._lock = threading.Lock()
+        self._ddl_done = False
+
+    def enabled(self) -> bool:
+        return bool(self.s.database_url) and psycopg is not None
+
+    def _connect(self):
+        if not self.enabled():
+            raise RuntimeError("2FA policy store unavailable (no DATABASE_URL / psycopg)")
+        conn = psycopg.connect(self.s.database_url)
+        if not self._ddl_done:
+            with self._lock:
+                if not self._ddl_done:
+                    with conn.cursor() as cur:
+                        cur.execute(_POLICY_DDL)
+                    conn.commit()
+                    self._ddl_done = True
+        return conn
+
+    def get(self, tenant: str) -> TenantPolicy:
+        """The tenant's stored policy, or the inherit-everything default. Never
+        raises when the store is unconfigured — returns the default so the app
+        runs (and every method stays permitted) without a DB."""
+        if not self.enabled():
+            return TenantPolicy(allowed_methods=None, require=False)
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT allowed_methods, require_2fa FROM tenant_2fa_policy "
+                        "WHERE tenant=%s", (tenant,))
+            row = cur.fetchone()
+        if not row:
+            return TenantPolicy(allowed_methods=None, require=False)
+        allowed, require = row
+        return TenantPolicy(allowed_methods=allowed, require=bool(require))
+
+    def set(self, tenant: str, allowed_methods: Optional[list[str]], require: bool) -> None:
+        """Upsert the policy. ``allowed_methods=None`` clears the restriction
+        (inherit the cap); a list restricts to those methods (validated by the
+        caller against the deployment cap)."""
+        payload = None if allowed_methods is None else json.dumps(allowed_methods)
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO tenant_2fa_policy (tenant, allowed_methods, require_2fa, updated_at) "
+                "VALUES (%s, %s, %s, now()) "
+                "ON CONFLICT (tenant) DO UPDATE SET "
+                "allowed_methods=EXCLUDED.allowed_methods, require_2fa=EXCLUDED.require_2fa, "
+                "updated_at=now()",
+                (tenant, payload, require))
+            conn.commit()

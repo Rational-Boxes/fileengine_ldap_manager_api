@@ -17,7 +17,7 @@ from .ldap_client import LdapClient, LdapError, MasterUnavailable
 from .password_policy import PasswordPolicy
 from .templates import TemplateStore
 from .tokens import TokenStore
-from .twofa import TwoFactorStore
+from .twofa import TwoFactorStore, TwoFactorPolicyStore
 from .routers import admin_roles, admin_templates, admin_users, health, me, public_auth, twofa
 
 
@@ -34,6 +34,7 @@ def build_services(settings: Settings) -> Services:
         home=HomeProvisioner(settings.bridge_url),
         audit=AuditEmitter(settings.audit_enabled),
         twofa=TwoFactorStore(settings),
+        twofa_policy=TwoFactorPolicyStore(settings),
     )
 
 

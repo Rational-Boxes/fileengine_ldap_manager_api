@@ -170,3 +170,56 @@ def test_internal_requires_secret(client):
 
 def test_self_service_requires_bearer(client):
     assert client.get("/v1/me/2fa/status").status_code == 401
+
+
+def test_tenant_admin_policy(client):
+    # The admin endpoints gate on LDAP tenant-admin membership; override that
+    # dependency to isolate the policy logic (the gate is shared + tested elsewhere).
+    from ldap_manager.deps import require_tenant_admin
+    from ldap_manager.identity import Identity
+    app = client.app
+    app.dependency_overrides[require_tenant_admin] = \
+        lambda: Identity(user="admin@x", tenant=TENANT, roles=["tenant_admin"])
+    try:
+        app.state.services.twofa_policy.set(TENANT, None, False)   # clean slate
+        app.state.services.twofa.disable(TENANT, UID)
+
+        # Default: the tenant inherits the full deployment cap, not required.
+        r = client.get("/v1/admin/2fa-policy")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["deployment_methods"] == ["totp", "email"]
+        assert body["allowed_methods"] == ["totp", "email"]
+        assert body["require"] is False
+
+        # Restrict to authenticator only (disable weaker email recovery).
+        r = client.put("/v1/admin/2fa-policy", json={"allowed_methods": ["totp"], "require": False})
+        assert r.status_code == 200, r.text
+        assert r.json()["allowed_methods"] == ["totp"]
+
+        # The restriction is in force on the self-service + internal surfaces.
+        assert client.get("/v1/me/2fa/status", headers=_auth()).json()["methods"] == ["totp"]
+        assert client.post("/internal/2fa/email-challenge", headers=_internal(),
+                           json={"uid": UID, "tenant": TENANT}).status_code == 403
+
+        # Require 2FA -> a non-enrolled member must enroll.
+        r = client.put("/v1/admin/2fa-policy", json={"allowed_methods": ["totp"], "require": True})
+        assert r.status_code == 200 and r.json()["require"] is True
+        rq = client.post("/internal/2fa/required", headers=_internal(),
+                         json={"uid": UID, "tenant": TENANT}).json()
+        assert rq["required"] is True and rq["must_enroll"] is True
+
+        # Cannot require 2FA while allowing no method.
+        assert client.put("/v1/admin/2fa-policy",
+                          json={"allowed_methods": [], "require": True}).status_code == 400
+        # A method outside the deployment cap is rejected.
+        assert client.put("/v1/admin/2fa-policy",
+                          json={"allowed_methods": ["webauthn"], "require": False}).status_code == 400
+
+        # Reset (null = inherit) -> the full cap is permitted again.
+        r = client.put("/v1/admin/2fa-policy", json={"allowed_methods": None, "require": False})
+        assert r.status_code == 200 and r.json()["allowed_methods"] == ["totp", "email"]
+    finally:
+        app.dependency_overrides.pop(require_tenant_admin, None)
+        app.state.services.twofa_policy.set(TENANT, None, False)
+        app.state.services.twofa.disable(TENANT, UID)
