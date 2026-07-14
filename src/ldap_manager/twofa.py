@@ -139,15 +139,36 @@ def effective_methods(deployment_cap: list[str],
 
 # --------------------------- persistence -------------------------------------
 
+# 2FA enrollment is per-USER (the authenticator binds to the person, shared across
+# every tenant they belong to) — keyed by uid alone. The requirement to *use* 2FA
+# stays per-tenant (tenant_2fa_policy). Older builds keyed this by (tenant, uid);
+# migrate those rows by collapsing to the newest/enabled row per uid.
 _DDL = """
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_name = 'user_2fa' AND column_name = 'tenant') THEN
+        CREATE TABLE IF NOT EXISTS user_2fa_v2 (
+            uid            TEXT PRIMARY KEY,
+            totp_secret    BYTEA,
+            enabled        BOOLEAN NOT NULL DEFAULT false,
+            recovery_codes JSONB NOT NULL DEFAULT '[]'::jsonb,
+            updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        INSERT INTO user_2fa_v2 (uid, totp_secret, enabled, recovery_codes, updated_at)
+            SELECT DISTINCT ON (uid) uid, totp_secret, enabled, recovery_codes, updated_at
+            FROM user_2fa ORDER BY uid, enabled DESC, updated_at DESC
+        ON CONFLICT (uid) DO NOTHING;
+        DROP TABLE user_2fa;
+        ALTER TABLE user_2fa_v2 RENAME TO user_2fa;
+    END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS user_2fa (
-    tenant         TEXT NOT NULL,
-    uid            TEXT NOT NULL,
+    uid            TEXT PRIMARY KEY,
     totp_secret    BYTEA,
     enabled        BOOLEAN NOT NULL DEFAULT false,
     recovery_codes JSONB NOT NULL DEFAULT '[]'::jsonb,
-    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant, uid)
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -183,10 +204,10 @@ class TwoFactorStore:
                     self._ddl_done = True
         return conn
 
-    def status(self, tenant: str, uid: str) -> TwoFactorStatus:
+    def status(self, uid: str) -> TwoFactorStatus:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT enabled, totp_secret, recovery_codes "
-                        "FROM user_2fa WHERE tenant=%s AND uid=%s", (tenant, uid))
+                        "FROM user_2fa WHERE uid=%s", (uid,))
             row = cur.fetchone()
         if not row:
             return TwoFactorStatus(False, False, 0)
@@ -194,46 +215,46 @@ class TwoFactorStore:
         remaining = sum(1 for c in (codes or []) if not c.get("used_at"))
         return TwoFactorStatus(bool(enabled), secret is not None and not enabled, remaining)
 
-    def is_enabled(self, tenant: str, uid: str) -> bool:
-        return self.status(tenant, uid).enabled
+    def is_enabled(self, uid: str) -> bool:
+        return self.status(uid).enabled
 
-    def set_pending_secret(self, tenant: str, uid: str, secret_b32: str) -> None:
+    def set_pending_secret(self, uid: str, secret_b32: str) -> None:
         blob = encrypt_secret(self.s.totp_secret_key, secret_b32)
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO user_2fa (tenant, uid, totp_secret, enabled, updated_at) "
-                "VALUES (%s,%s,%s,false, now()) "
-                "ON CONFLICT (tenant, uid) DO UPDATE SET "
+                "INSERT INTO user_2fa (uid, totp_secret, enabled, updated_at) "
+                "VALUES (%s,%s,false, now()) "
+                "ON CONFLICT (uid) DO UPDATE SET "
                 "totp_secret=EXCLUDED.totp_secret, enabled=false, updated_at=now()",
-                (tenant, uid, blob))
+                (uid, blob))
             conn.commit()
 
-    def get_secret(self, tenant: str, uid: str) -> Optional[str]:
+    def get_secret(self, uid: str) -> Optional[str]:
         with self._connect() as conn, conn.cursor() as cur:
-            cur.execute("SELECT totp_secret FROM user_2fa WHERE tenant=%s AND uid=%s", (tenant, uid))
+            cur.execute("SELECT totp_secret FROM user_2fa WHERE uid=%s", (uid,))
             row = cur.fetchone()
         if not row or row[0] is None:
             return None
         return decrypt_secret(self.s.totp_secret_key, row[0])
 
-    def enable(self, tenant: str, uid: str, recovery_hashes: list[str]) -> None:
+    def enable(self, uid: str, recovery_hashes: list[str]) -> None:
         codes = json.dumps([{"hash": h, "used_at": None} for h in recovery_hashes])
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute("UPDATE user_2fa SET enabled=true, recovery_codes=%s, updated_at=now() "
-                        "WHERE tenant=%s AND uid=%s", (codes, tenant, uid))
+                        "WHERE uid=%s", (codes, uid))
             conn.commit()
 
-    def disable(self, tenant: str, uid: str) -> None:
+    def disable(self, uid: str) -> None:
         with self._connect() as conn, conn.cursor() as cur:
-            cur.execute("DELETE FROM user_2fa WHERE tenant=%s AND uid=%s", (tenant, uid))
+            cur.execute("DELETE FROM user_2fa WHERE uid=%s", (uid,))
             conn.commit()
 
-    def consume_recovery_code(self, tenant: str, uid: str, code: str) -> bool:
+    def consume_recovery_code(self, uid: str, code: str) -> bool:
         """Single-use: mark a matching, unused recovery code as used. Atomic."""
         h = hash_recovery_code(code)
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT recovery_codes FROM user_2fa "
-                        "WHERE tenant=%s AND uid=%s FOR UPDATE", (tenant, uid))
+                        "WHERE uid=%s FOR UPDATE", (uid,))
             row = cur.fetchone()
             if not row:
                 return False
@@ -242,7 +263,7 @@ class TwoFactorStore:
                 if entry.get("hash") == h and not entry.get("used_at"):
                     entry["used_at"] = int(time.time())
                     cur.execute("UPDATE user_2fa SET recovery_codes=%s, updated_at=now() "
-                                "WHERE tenant=%s AND uid=%s", (json.dumps(codes), tenant, uid))
+                                "WHERE uid=%s", (json.dumps(codes), uid))
                     conn.commit()
                     return True
         return False

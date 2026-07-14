@@ -65,11 +65,11 @@ def client(monkeypatch):
     settings = load_settings()
     app = create_app(settings)
     # Clean slate for this (tenant, uid).
-    app.state.services.twofa.disable(TENANT, UID)
+    app.state.services.twofa.disable(UID)
     c = TestClient(app)
     c._settings = settings  # type: ignore[attr-defined]
     yield c
-    app.state.services.twofa.disable(TENANT, UID)
+    app.state.services.twofa.disable(UID)
 
 
 def _auth(roles: list[str] | None = None) -> dict:
@@ -114,7 +114,10 @@ def test_full_totp_lifecycle(client):
     # internal: required? -> yes (enabled)
     r = client.post("/internal/2fa/required", headers=_internal(),
                     json={"uid": UID, "tenant": TENANT})
-    assert r.status_code == 200 and r.json()["required"] is True and r.json()["enabled"] is True
+    # Per-user enrollment shows enabled; `required` follows the tenant policy —
+    # TENANT has no requirement, so enrollment alone does not force a challenge.
+    assert r.status_code == 200 and r.json()["enabled"] is True
+    assert r.json()["required"] is False and r.json()["tenant_requires"] is False
 
     # internal verify: correct TOTP -> ok
     code = twofa.totp_at(secret, time.time())
@@ -173,7 +176,7 @@ def test_setup_is_idempotent_while_pending(client):
     # a user can't end up with a scanned QR that no longer matches what's stored
     # (the lock-out this caused). A fresh secret is only minted after disable.
     h = _auth()
-    client.app.state.services.twofa.disable(TENANT, UID)  # clean slate
+    client.app.state.services.twofa.disable(UID)  # clean slate
     s1 = client.post("/v1/me/2fa/setup", headers=h).json()["secret"]
     s2 = client.post("/v1/me/2fa/setup", headers=h).json()["secret"]
     assert s1 == s2, "re-opening setup must reuse the pending secret"
@@ -185,7 +188,7 @@ def test_setup_is_idempotent_while_pending(client):
 
     s3 = client.post("/v1/me/2fa/setup", headers=h).json()["secret"]
     assert s3 != s1, "after disable, a fresh enrollment mints a new secret"
-    client.app.state.services.twofa.disable(TENANT, UID)
+    client.app.state.services.twofa.disable(UID)
 
 
 def test_self_service_requires_bearer(client):
@@ -202,7 +205,7 @@ def test_tenant_admin_policy(client):
         lambda: Identity(user="admin@x", tenant=TENANT, roles=["tenant_admin"])
     try:
         app.state.services.twofa_policy.set(TENANT, None, False)   # clean slate
-        app.state.services.twofa.disable(TENANT, UID)
+        app.state.services.twofa.disable(UID)
 
         # Default: the tenant inherits the full deployment cap, not required.
         r = client.get("/v1/admin/2fa-policy")
@@ -242,4 +245,4 @@ def test_tenant_admin_policy(client):
     finally:
         app.dependency_overrides.pop(require_tenant_admin, None)
         app.state.services.twofa_policy.set(TENANT, None, False)
-        app.state.services.twofa.disable(TENANT, UID)
+        app.state.services.twofa.disable(UID)

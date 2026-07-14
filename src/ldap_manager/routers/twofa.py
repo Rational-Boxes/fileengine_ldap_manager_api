@@ -61,7 +61,7 @@ class CodeIn(BaseModel):
 
 @router.get("/v1/me/2fa/status")
 def status(svc: Services = Depends(services), ident: Identity = Depends(require_identity)) -> dict:
-    st = svc.twofa.status(ident.tenant, ident.user)
+    st = svc.twofa.status(ident.user)
     return {"enabled": st.enabled, "pending": st.pending,
             "recovery_remaining": st.recovery_remaining,
             "required": _required(svc, ident.tenant),
@@ -80,11 +80,11 @@ def setup(svc: Services = Depends(services), ident: Identity = Depends(require_i
     # different secret stored — so the code they read never matches (the exact
     # lock-out this caused). A fresh secret is only minted when there's no pending
     # enrollment (first time, or re-enrolling after disable).
-    st = svc.twofa.status(ident.tenant, ident.user)
-    secret = svc.twofa.get_secret(ident.tenant, ident.user) if st.pending else None
+    st = svc.twofa.status(ident.user)
+    secret = svc.twofa.get_secret(ident.user) if st.pending else None
     if not secret:
         secret = twofa.random_secret()
-        svc.twofa.set_pending_secret(ident.tenant, ident.user, secret)
+        svc.twofa.set_pending_secret(ident.user, secret)
     svc.audit.emit(action="2fa_setup", outcome="ok", actor=ident.user, tenant=ident.tenant)
     return {"secret": secret,
             "otpauth_uri": twofa.provisioning_uri(secret, ident.user, ISSUER),
@@ -94,14 +94,14 @@ def setup(svc: Services = Depends(services), ident: Identity = Depends(require_i
 @router.post("/v1/me/2fa/verify-setup")
 def verify_setup(body: CodeIn, svc: Services = Depends(services),
                  ident: Identity = Depends(require_identity)) -> dict:
-    secret = svc.twofa.get_secret(ident.tenant, ident.user)
+    secret = svc.twofa.get_secret(ident.user)
     if not secret:
         raise HTTPException(status_code=409, detail="no pending 2FA setup; call /setup first")
     if not twofa.totp_verify(secret, body.code):
         svc.audit.emit(action="2fa_verify_setup", outcome="denied", actor=ident.user, tenant=ident.tenant)
         raise HTTPException(status_code=400, detail="invalid code")
     codes = twofa.generate_recovery_codes()
-    svc.twofa.enable(ident.tenant, ident.user, [twofa.hash_recovery_code(c) for c in codes])
+    svc.twofa.enable(ident.user, [twofa.hash_recovery_code(c) for c in codes])
     svc.audit.emit(action="2fa_verify_setup", outcome="ok", actor=ident.user, tenant=ident.tenant)
     return {"enabled": True, "recovery_codes": codes}
 
@@ -109,14 +109,14 @@ def verify_setup(body: CodeIn, svc: Services = Depends(services),
 @router.post("/v1/me/2fa/disable")
 def disable(body: CodeIn, svc: Services = Depends(services),
             ident: Identity = Depends(require_identity)) -> dict:
-    if not svc.twofa.is_enabled(ident.tenant, ident.user):
+    if not svc.twofa.is_enabled(ident.user):
         return {"enabled": False}
-    secret = svc.twofa.get_secret(ident.tenant, ident.user)
+    secret = svc.twofa.get_secret(ident.user)
     ok = (bool(secret) and twofa.totp_verify(secret, body.code)) \
-        or svc.twofa.consume_recovery_code(ident.tenant, ident.user, body.code)
+        or svc.twofa.consume_recovery_code(ident.user, body.code)
     if not ok:
         raise HTTPException(status_code=400, detail="a valid 2FA or recovery code is required to disable")
-    svc.twofa.disable(ident.tenant, ident.user)
+    svc.twofa.disable(ident.user)
     svc.audit.emit(action="2fa_disable", outcome="ok", actor=ident.user, tenant=ident.tenant)
     return {"enabled": False}
 
@@ -124,12 +124,12 @@ def disable(body: CodeIn, svc: Services = Depends(services),
 @router.post("/v1/me/2fa/recovery-codes")
 def regenerate_recovery(body: CodeIn, svc: Services = Depends(services),
                         ident: Identity = Depends(require_identity)) -> dict:
-    secret = svc.twofa.get_secret(ident.tenant, ident.user)
-    if not (svc.twofa.is_enabled(ident.tenant, ident.user) and secret
+    secret = svc.twofa.get_secret(ident.user)
+    if not (svc.twofa.is_enabled(ident.user) and secret
             and twofa.totp_verify(secret, body.code)):
         raise HTTPException(status_code=400, detail="a valid TOTP code is required")
     codes = twofa.generate_recovery_codes()
-    svc.twofa.enable(ident.tenant, ident.user, [twofa.hash_recovery_code(c) for c in codes])
+    svc.twofa.enable(ident.user, [twofa.hash_recovery_code(c) for c in codes])
     svc.audit.emit(action="2fa_recovery_regenerate", outcome="ok", actor=ident.user, tenant=ident.tenant)
     return {"recovery_codes": codes}
 
@@ -160,10 +160,15 @@ class VerifyIn(BaseModel):
 @router.post("/internal/2fa/required")
 def internal_required(body: UserTenantIn, svc: Services = Depends(services),
                       _: None = Depends(require_internal)) -> dict:
-    enabled = svc.twofa.is_enabled(body.tenant, body.uid)
-    must_enroll = _required(svc, body.tenant) and not enabled
-    return {"required": enabled or must_enroll, "enabled": enabled,
-            "must_enroll": must_enroll, "methods": _effective_methods(svc, body.tenant)}
+    # 2FA is challenged when the ACTIVE TENANT requires it (per-tenant policy);
+    # enrollment is per-user. `tenant_requires` lets the bridge enforce the same
+    # rule on tenant switches (a non-2FA session entering a requiring tenant).
+    requires = _required(svc, body.tenant)
+    enabled = svc.twofa.is_enabled(body.uid)          # per-user, tenant-independent
+    return {"required": requires, "enabled": enabled,
+            "must_enroll": requires and not enabled,
+            "tenant_requires": requires,
+            "methods": _effective_methods(svc, body.tenant)}
 
 
 @router.post("/internal/2fa/verify")
@@ -179,12 +184,12 @@ def internal_verify(body: VerifyIn, request: Request, svc: Services = Depends(se
         raise HTTPException(status_code=400, detail="method not permitted")
     ok = False
     if method == "totp":
-        secret = svc.twofa.get_secret(body.tenant, body.uid)
+        secret = svc.twofa.get_secret(body.uid)
         ok = bool(secret) and twofa.totp_verify(secret, body.code)
     elif method == "email":
         ok = svc.tokens.consume_code("2fa_email", body.uid, body.code)
     elif method == "recovery":
-        ok = svc.twofa.consume_recovery_code(body.tenant, body.uid, body.code)
+        ok = svc.twofa.consume_recovery_code(body.uid, body.code)
     svc.audit.emit(action="2fa_verify", outcome="ok" if ok else "denied",
                    actor=body.uid, tenant=body.tenant, source_addr=ip, detail={"method": method})
     return {"ok": ok}
