@@ -168,6 +168,26 @@ def test_internal_requires_secret(client):
                        json={"uid": UID, "tenant": TENANT}).status_code == 403
 
 
+def test_setup_is_idempotent_while_pending(client):
+    # Re-opening setup during a pending enrollment must return the SAME secret, so
+    # a user can't end up with a scanned QR that no longer matches what's stored
+    # (the lock-out this caused). A fresh secret is only minted after disable.
+    h = _auth()
+    client.app.state.services.twofa.disable(TENANT, UID)  # clean slate
+    s1 = client.post("/v1/me/2fa/setup", headers=h).json()["secret"]
+    s2 = client.post("/v1/me/2fa/setup", headers=h).json()["secret"]
+    assert s1 == s2, "re-opening setup must reuse the pending secret"
+
+    code = twofa.totp_at(s1, time.time())
+    assert client.post("/v1/me/2fa/verify-setup", headers=h, json={"code": code}).status_code == 200
+    code = twofa.totp_at(s1, time.time())
+    assert client.post("/v1/me/2fa/disable", headers=h, json={"code": code}).status_code == 200
+
+    s3 = client.post("/v1/me/2fa/setup", headers=h).json()["secret"]
+    assert s3 != s1, "after disable, a fresh enrollment mints a new secret"
+    client.app.state.services.twofa.disable(TENANT, UID)
+
+
 def test_self_service_requires_bearer(client):
     assert client.get("/v1/me/2fa/status").status_code == 401
 

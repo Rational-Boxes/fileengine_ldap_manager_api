@@ -74,8 +74,17 @@ def setup(svc: Services = Depends(services), ident: Identity = Depends(require_i
         raise HTTPException(status_code=403, detail="TOTP is not permitted for this tenant")
     if not svc.settings.totp_secret_key:
         raise HTTPException(status_code=503, detail="2FA is not configured (TOTP_SECRET_KEY unset)")
-    secret = twofa.random_secret()
-    svc.twofa.set_pending_secret(ident.tenant, ident.user, secret)
+    # Idempotent while enrollment is pending: re-opening setup returns the SAME
+    # secret/QR instead of minting a new one. Otherwise a user who re-visits (or
+    # double-clicks) ends up with a stale QR already scanned into their app and a
+    # different secret stored — so the code they read never matches (the exact
+    # lock-out this caused). A fresh secret is only minted when there's no pending
+    # enrollment (first time, or re-enrolling after disable).
+    st = svc.twofa.status(ident.tenant, ident.user)
+    secret = svc.twofa.get_secret(ident.tenant, ident.user) if st.pending else None
+    if not secret:
+        secret = twofa.random_secret()
+        svc.twofa.set_pending_secret(ident.tenant, ident.user, secret)
     svc.audit.emit(action="2fa_setup", outcome="ok", actor=ident.user, tenant=ident.tenant)
     return {"secret": secret,
             "otpauth_uri": twofa.provisioning_uri(secret, ident.user, ISSUER),
