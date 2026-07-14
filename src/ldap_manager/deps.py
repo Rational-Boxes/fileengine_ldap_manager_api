@@ -18,6 +18,7 @@ from .ldap_client import LdapClient
 from .password_policy import PasswordPolicy
 from .templates import TemplateStore
 from .tokens import TokenStore
+from .twofa import TwoFactorStore
 
 
 @dataclass
@@ -31,6 +32,7 @@ class Services:
     policy: PasswordPolicy
     home: HomeProvisioner
     audit: AuditEmitter
+    twofa: TwoFactorStore
 
 
 def services(request: Request) -> Services:

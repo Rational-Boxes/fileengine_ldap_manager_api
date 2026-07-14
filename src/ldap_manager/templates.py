@@ -21,15 +21,17 @@ except Exception:  # pragma: no cover
 NEW_USER = "new_user"
 ACCESS_GRANTED = "access_granted"
 PASSWORD_RESET = "password_reset"   # system-level (not per-tenant)
+TWO_FA_EMAIL = "2fa_email_code"     # tenant-customizable one-time 2FA email code
 
 # Allowed placeholders per kind (§5.1 / §5.2). A PUT with any others is rejected.
 ALLOWED: dict[str, set[str]] = {
     NEW_USER: {"display_name", "email", "tenant", "invite_link", "expires", "inviter", "roles"},
     ACCESS_GRANTED: {"display_name", "email", "tenant", "app_link", "inviter", "roles"},
     PASSWORD_RESET: {"display_name", "email", "reset_link", "expires"},
+    TWO_FA_EMAIL: {"display_name", "email", "code", "expires"},
 }
 
-TENANT_KINDS = (NEW_USER, ACCESS_GRANTED)
+TENANT_KINDS = (NEW_USER, ACCESS_GRANTED, TWO_FA_EMAIL)
 
 
 @dataclass
@@ -67,6 +69,15 @@ DEFAULTS: dict[str, Template] = {
             " the link below (expires {{expires}}):</p>"
             "<p><a href=\"{{reset_link}}\">Reset your password</a></p>"
             "<p>If you didn't request this, you can ignore this email.</p>"
+        ),
+    ),
+    TWO_FA_EMAIL: Template(
+        subject="Your sign-in code",
+        body=(
+            "<p>Hi {{display_name}},</p>"
+            "<p>Your one-time sign-in code is <strong>{{code}}</strong>."
+            " It expires in {{expires}}.</p>"
+            "<p>If you didn't try to sign in, change your password immediately.</p>"
         ),
     ),
 }

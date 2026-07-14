@@ -17,7 +17,8 @@ from .ldap_client import LdapClient, LdapError, MasterUnavailable
 from .password_policy import PasswordPolicy
 from .templates import TemplateStore
 from .tokens import TokenStore
-from .routers import admin_roles, admin_templates, admin_users, health, me, public_auth
+from .twofa import TwoFactorStore
+from .routers import admin_roles, admin_templates, admin_users, health, me, public_auth, twofa
 
 
 def build_services(settings: Settings) -> Services:
@@ -32,6 +33,7 @@ def build_services(settings: Settings) -> Services:
         policy=PasswordPolicy(settings.password_policy),
         home=HomeProvisioner(settings.bridge_url),
         audit=AuditEmitter(settings.audit_enabled),
+        twofa=TwoFactorStore(settings),
     )
 
 
@@ -88,6 +90,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_users.router)
     app.include_router(admin_roles.router)
     app.include_router(admin_templates.router)
+    app.include_router(twofa.router)
     return app
 
 

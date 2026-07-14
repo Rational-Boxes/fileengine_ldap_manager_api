@@ -100,6 +100,7 @@ class Settings:
     mfa_email_ttl_s: int = 300                # email one-time-code lifetime
     mfa_rate_per_ip: int = 5                  # 2FA attempts per window per source IP
     mfa_rate_window_s: int = 300
+    mfa_internal_secret: str = ""             # shared secret for http_bridge -> /internal/2fa/*
 
     # --- email / invites / reset (§5) ---
     smtp_host: str = ""
@@ -155,6 +156,7 @@ def load_settings() -> "Settings":
         mfa_email_ttl_s=_int("MFA_EMAIL_TTL_S", 300),
         mfa_rate_per_ip=_int("MFA_RATE_PER_IP", 5),
         mfa_rate_window_s=_int("MFA_RATE_WINDOW_S", 300),
+        mfa_internal_secret=_env("MFA_INTERNAL_SECRET", ""),
         smtp_host=_env("SMTP_HOST", ""),
         smtp_port=_int("SMTP_PORT", 587),
         smtp_user=_env("SMTP_USER", ""),

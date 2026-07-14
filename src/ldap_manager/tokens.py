@@ -85,6 +85,31 @@ class TokenStore:
         pipe.delete(idx)
         pipe.execute()
 
+    def _code_key(self, kind: str, uid: str) -> str:
+        return f"ldapmgr:{kind}:code:{_hash(uid)}"
+
+    def issue_code(self, kind: str, uid: str, code: str, ttl_seconds: int) -> None:
+        """Store a chosen short code (e.g. a 6-digit email 2FA OTP) for ``uid``,
+        hashed, with TTL. One live code per ``(kind, uid)``; a new challenge
+        replaces the previous. No-op when Redis is off."""
+        if self._r is not None:
+            self._r.setex(self._code_key(kind, uid), ttl_seconds, _hash(code))
+
+    def consume_code(self, kind: str, uid: str, code: str) -> bool:
+        """Single-use, constant-time verify of a code issued via ``issue_code``.
+        A wrong code is not deleted (caller rate-limits retries within the TTL)."""
+        if self._r is None or not code:
+            return False
+        key = self._code_key(kind, uid)
+        stored = self._r.get(key)
+        if stored is None:
+            return False
+        stored = stored.decode("utf-8") if isinstance(stored, bytes) else str(stored)
+        if secrets.compare_digest(stored, _hash(code)):
+            self._r.delete(key)
+            return True
+        return False
+
     def rate_ok(self, bucket: str, limit: int, window_s: int) -> bool:
         """Fixed-window rate limit: True if ``bucket`` is under ``limit`` in the
         current ``window_s``. No-op (allow) when Redis is off or limit<=0."""
