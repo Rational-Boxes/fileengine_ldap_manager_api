@@ -220,6 +220,59 @@ def internal_email_challenge(body: UserTenantIn, svc: Services = Depends(service
     return {"sent": sent}
 
 
+class EnrollCompleteIn(BaseModel):
+    uid: str
+    tenant: str
+    code: str
+
+
+@router.post("/internal/2fa/enroll-begin")
+def internal_enroll_begin(body: UserTenantIn, svc: Services = Depends(services),
+                          _: None = Depends(require_internal)) -> dict:
+    """Grace enrollment for a mandated-but-unenrolled user during login: the bridge
+    (holding the user's pre-auth challenge token) drives TOTP setup on their behalf.
+    Mirrors self-service /setup (idempotent while pending) but is uid-addressed and
+    internal-secret-guarded."""
+    if "totp" not in _effective_methods(svc, body.tenant):
+        raise HTTPException(status_code=403, detail="TOTP is not permitted for this tenant")
+    if not svc.settings.totp_secret_key:
+        raise HTTPException(status_code=503, detail="2FA is not configured (TOTP_SECRET_KEY unset)")
+    st = svc.twofa.status(body.uid)
+    secret = svc.twofa.get_secret(body.uid) if st.pending else None
+    if not secret:
+        secret = twofa.random_secret()
+        svc.twofa.set_pending_secret(body.uid, secret)
+    svc.audit.emit(action="2fa_setup", outcome="ok", actor=body.uid, tenant=body.tenant)
+    return {"secret": secret,
+            "otpauth_uri": twofa.provisioning_uri(secret, body.uid, ISSUER),
+            "issuer": ISSUER, "account": body.uid}
+
+
+@router.post("/internal/2fa/enroll-complete")
+def internal_enroll_complete(body: EnrollCompleteIn, request: Request,
+                             svc: Services = Depends(services),
+                             _: None = Depends(require_internal)) -> dict:
+    """Confirm a grace enrollment: verify the code against the pending secret,
+    enable 2FA, and return the one-time recovery codes. Rate-limited like verify."""
+    ip = client_ip(request)
+    s = svc.settings
+    if not (svc.tokens.rate_ok(f"2fa:ip:{ip}", s.mfa_rate_per_ip, s.mfa_rate_window_s)
+            and svc.tokens.rate_ok(f"2fa:uid:{body.uid}", s.mfa_rate_per_ip, s.mfa_rate_window_s)):
+        raise HTTPException(status_code=429, detail="too many attempts")
+    secret = svc.twofa.get_secret(body.uid)
+    if not secret:
+        raise HTTPException(status_code=409, detail="no pending 2FA setup; call enroll-begin first")
+    if not twofa.totp_verify(secret, body.code):
+        svc.audit.emit(action="2fa_verify_setup", outcome="denied", actor=body.uid,
+                       tenant=body.tenant, source_addr=ip)
+        return {"ok": False}
+    codes = twofa.generate_recovery_codes()
+    svc.twofa.enable(body.uid, [twofa.hash_recovery_code(c) for c in codes])
+    svc.audit.emit(action="2fa_verify_setup", outcome="ok", actor=body.uid,
+                   tenant=body.tenant, source_addr=ip)
+    return {"ok": True, "recovery_codes": codes}
+
+
 # ------------------------------ tenant-admin policy --------------------------
 # A tenant admin sets which 2FA methods their tenant permits (a subset of the
 # deployment cap — e.g. disable weaker email recovery for a security-critical
