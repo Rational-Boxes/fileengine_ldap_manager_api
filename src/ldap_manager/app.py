@@ -18,7 +18,9 @@ from .password_policy import PasswordPolicy
 from .templates import TemplateStore
 from .tokens import TokenStore
 from .twofa import TwoFactorStore, TwoFactorPolicyStore
-from .routers import admin_roles, admin_templates, admin_users, health, me, public_auth, twofa
+from .service_cred import ServiceCredentialStore
+from .routers import (admin_roles, admin_templates, admin_users, health, me,
+                      public_auth, twofa, service_cred)
 
 
 def build_services(settings: Settings) -> Services:
@@ -35,6 +37,7 @@ def build_services(settings: Settings) -> Services:
         audit=AuditEmitter(settings.audit_enabled),
         twofa=TwoFactorStore(settings),
         twofa_policy=TwoFactorPolicyStore(settings),
+        service_cred=ServiceCredentialStore(settings),
     )
 
 
@@ -92,6 +95,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_roles.router)
     app.include_router(admin_templates.router)
     app.include_router(twofa.router)
+    app.include_router(service_cred.router)
     return app
 
 

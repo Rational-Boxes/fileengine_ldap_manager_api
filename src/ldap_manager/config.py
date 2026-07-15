@@ -102,6 +102,11 @@ class Settings:
     mfa_rate_window_s: int = 300
     mfa_internal_secret: str = ""             # shared secret for http_bridge -> /internal/2fa/*
 
+    # --- service credentials (key:secret for the WebDAV/MCP doors, PROPOSAL §15/§16) ---
+    service_cred_pepper: str = ""             # HMAC pepper for the secret at rest; unset ⇒ feature 503s
+    service_cred_max_per_user: int = 10       # per-user credential cap
+    service_cred_internal_secret: str = ""    # guards /internal/service-cred/verify (falls back to mfa_internal_secret)
+
     # --- email / invites / reset (§5) ---
     smtp_host: str = ""
     smtp_port: int = 587
@@ -157,6 +162,9 @@ def load_settings() -> "Settings":
         mfa_rate_per_ip=_int("MFA_RATE_PER_IP", 5),
         mfa_rate_window_s=_int("MFA_RATE_WINDOW_S", 300),
         mfa_internal_secret=_env("MFA_INTERNAL_SECRET", ""),
+        service_cred_pepper=_env("SERVICE_CRED_HASH_PEPPER", ""),
+        service_cred_max_per_user=_int("SERVICE_CRED_MAX_PER_USER", 10),
+        service_cred_internal_secret=_env("SERVICE_CRED_INTERNAL_SECRET", ""),
         smtp_host=_env("SMTP_HOST", ""),
         smtp_port=_int("SMTP_PORT", 587),
         smtp_user=_env("SMTP_USER", ""),

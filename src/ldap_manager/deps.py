@@ -19,6 +19,7 @@ from .password_policy import PasswordPolicy
 from .templates import TemplateStore
 from .tokens import TokenStore
 from .twofa import TwoFactorStore, TwoFactorPolicyStore
+from .service_cred import ServiceCredentialStore
 
 
 @dataclass
@@ -34,6 +35,7 @@ class Services:
     audit: AuditEmitter
     twofa: TwoFactorStore
     twofa_policy: TwoFactorPolicyStore
+    service_cred: ServiceCredentialStore
 
 
 def services(request: Request) -> Services:
