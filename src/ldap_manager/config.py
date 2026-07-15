@@ -107,6 +107,11 @@ class Settings:
     service_cred_max_per_user: int = 10       # per-user credential cap
     service_cred_internal_secret: str = ""    # guards /internal/service-cred/verify (falls back to mfa_internal_secret)
 
+    # --- per-tenant WebDAV session TTL (PROPOSAL §14.10) ---
+    webdav_session_ttl_default: int = 43200   # deployment default (12h) if a tenant sets no override
+    webdav_session_ttl_min: int = 300         # clamp floor a tenant admin may pick (5m)
+    webdav_session_ttl_max: int = 86400       # clamp ceiling (24h)
+
     # --- email / invites / reset (§5) ---
     smtp_host: str = ""
     smtp_port: int = 587
@@ -165,6 +170,9 @@ def load_settings() -> "Settings":
         service_cred_pepper=_env("SERVICE_CRED_HASH_PEPPER", ""),
         service_cred_max_per_user=_int("SERVICE_CRED_MAX_PER_USER", 10),
         service_cred_internal_secret=_env("SERVICE_CRED_INTERNAL_SECRET", ""),
+        webdav_session_ttl_default=_int("WEBDAV_IP_BIND_TTL_SECONDS", 43200),
+        webdav_session_ttl_min=_int("WEBDAV_SESSION_TTL_MIN_SECONDS", 300),
+        webdav_session_ttl_max=_int("WEBDAV_SESSION_TTL_MAX_SECONDS", 86400),
         smtp_host=_env("SMTP_HOST", ""),
         smtp_port=_int("SMTP_PORT", 587),
         smtp_user=_env("SMTP_USER", ""),

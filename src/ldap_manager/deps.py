@@ -20,6 +20,7 @@ from .templates import TemplateStore
 from .tokens import TokenStore
 from .twofa import TwoFactorStore, TwoFactorPolicyStore
 from .service_cred import ServiceCredentialStore
+from .webdav_policy import WebDavSessionPolicyStore
 
 
 @dataclass
@@ -36,6 +37,7 @@ class Services:
     twofa: TwoFactorStore
     twofa_policy: TwoFactorPolicyStore
     service_cred: ServiceCredentialStore
+    webdav_policy: WebDavSessionPolicyStore
 
 
 def services(request: Request) -> Services:

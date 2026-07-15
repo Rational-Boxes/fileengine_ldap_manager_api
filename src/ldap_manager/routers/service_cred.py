@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel
 
 from .. import service_cred as sc
-from ..deps import Services, require_identity, services
+from ..deps import Services, require_identity, require_tenant_admin, services
 from ..identity import Identity
 
 router = APIRouter()
@@ -128,3 +128,44 @@ def internal_verify(body: VerifyIn, svc: Services = Depends(services),
     if uid is None:
         raise HTTPException(status_code=401, detail="invalid credential")
     return {"uid": uid, "tenant": body.tenant}
+
+
+# ------------------------- per-tenant WebDAV session TTL (§14.10) -------------
+# A tenant admin sets how long a WebDAV-authorizing session survives (their
+# security stance); http_bridge reads the effective value at login/refresh.
+
+class SessionTtlIn(BaseModel):
+    # None clears the override (inherit the deployment default); a value is clamped
+    # server-side to the deployment MIN/MAX bounds.
+    session_ttl_seconds: int | None = None
+
+
+@router.get("/v1/admin/webdav-session-ttl")
+def get_session_ttl(svc: Services = Depends(services),
+                    ident: Identity = Depends(require_tenant_admin)) -> dict:
+    return svc.webdav_policy.get(ident.tenant)
+
+
+@router.put("/v1/admin/webdav-session-ttl")
+def put_session_ttl(body: SessionTtlIn, svc: Services = Depends(services),
+                    ident: Identity = Depends(require_tenant_admin)) -> dict:
+    if body.session_ttl_seconds is not None and body.session_ttl_seconds <= 0:
+        raise HTTPException(status_code=400, detail="session_ttl_seconds must be positive or null")
+    if not svc.audit.emit(category="admin", action="webdav_session_ttl_set", outcome="ok",
+                          actor=ident.user, tenant=ident.tenant,
+                          detail={"session_ttl_seconds": body.session_ttl_seconds}):
+        raise HTTPException(status_code=503, detail="audit log unavailable")
+    svc.webdav_policy.set(ident.tenant, body.session_ttl_seconds)
+    return svc.webdav_policy.get(ident.tenant)
+
+
+class TenantIn(BaseModel):
+    tenant: str
+
+
+@router.post("/internal/webdav/session-ttl")
+def internal_session_ttl(body: TenantIn, svc: Services = Depends(services),
+                         _: None = Depends(require_internal)) -> dict:
+    """http_bridge calls this at login/refresh to score the Redis session member
+    with the tenant's effective (clamped) TTL."""
+    return {"ttl_seconds": svc.webdav_policy.effective_ttl(body.tenant)}

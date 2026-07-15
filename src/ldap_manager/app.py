@@ -19,6 +19,7 @@ from .templates import TemplateStore
 from .tokens import TokenStore
 from .twofa import TwoFactorStore, TwoFactorPolicyStore
 from .service_cred import ServiceCredentialStore
+from .webdav_policy import WebDavSessionPolicyStore
 from .routers import (admin_roles, admin_templates, admin_users, health, me,
                       public_auth, twofa, service_cred)
 
@@ -38,6 +39,7 @@ def build_services(settings: Settings) -> Services:
         twofa=TwoFactorStore(settings),
         twofa_policy=TwoFactorPolicyStore(settings),
         service_cred=ServiceCredentialStore(settings),
+        webdav_policy=WebDavSessionPolicyStore(settings),
     )
 
 
