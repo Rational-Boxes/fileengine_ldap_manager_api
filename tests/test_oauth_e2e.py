@@ -247,3 +247,86 @@ def test_public_client_requires_pkce(client):
     assert r.status_code == 302
     q = parse_qs(urlparse(r.headers["location"]).query)
     assert q.get("error") == ["invalid_request"] and "code" not in q
+
+
+# ------------------------------ consent flow --------------------------------
+def _authz_body(cid, challenge, **over):
+    body = {"response_type": "code", "client_id": cid,
+            "redirect_uri": "https://portal.example.test/callback",
+            "scope": "openid profile email", "state": "st-1", "nonce": "n-1",
+            "code_challenge": challenge, "code_challenge_method": "S256"}
+    body.update(over)
+    return body
+
+
+def test_prepare_trusted_client_issues_code_without_consent(client):
+    data = _make_client(client, trusted=True)
+    _, ch = _pkce()
+    r = client.post("/oauth/authorize/prepare", json=_authz_body(data["client_id"], ch))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["action"] == "redirect"
+    q = parse_qs(urlparse(body["url"]).query)
+    assert "code" in q and q["state"] == ["st-1"]
+
+
+def test_prepare_untrusted_client_asks_for_consent(client):
+    data = _make_client(client, name="Third Party", trusted=False)
+    _, ch = _pkce()
+    r = client.post("/oauth/authorize/prepare", json=_authz_body(data["client_id"], ch))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["action"] == "consent"
+    assert body["client_name"] == "Third Party"
+    assert set(body["scopes"]) == {"openid", "profile", "email"}
+
+
+def test_decision_deny_redirects_access_denied(client):
+    data = _make_client(client, trusted=False)
+    _, ch = _pkce()
+    r = client.post("/oauth/authorize/decision",
+                    json={**_authz_body(data["client_id"], ch), "approved": False})
+    q = parse_qs(urlparse(r.json()["url"]).query)
+    assert q["error"] == ["access_denied"] and q["state"] == ["st-1"] and "code" not in q
+
+
+def test_decision_approve_issues_code_exchangeable_at_token(client):
+    data = _make_client(client, trusted=False)
+    cid, secret = data["client_id"], data["client_secret"]
+    verifier, ch = _pkce()
+    r = client.post("/oauth/authorize/decision",
+                    json={**_authz_body(cid, ch), "approved": True})
+    code = parse_qs(urlparse(r.json()["url"]).query)["code"][0]
+    tok = client.post("/oauth/token", data={
+        "grant_type": "authorization_code", "code": code,
+        "redirect_uri": "https://portal.example.test/callback",
+        "code_verifier": verifier}, headers=_basic(cid, secret))
+    assert tok.status_code == 200 and tok.json()["access_token"] and tok.json()["id_token"]
+
+
+def test_remembered_consent_skips_the_next_prompt(client):
+    data = _make_client(client, trusted=False)
+    cid = data["client_id"]
+    _, ch = _pkce()
+    # deny-less approve with remember → grant recorded
+    d = client.post("/oauth/authorize/decision",
+                    json={**_authz_body(cid, ch), "approved": True, "remember": True})
+    assert d.json()["action"] == "redirect"
+    # a subsequent prepare for the same client+scopes auto-redirects (no consent)
+    _, ch2 = _pkce()
+    p = client.post("/oauth/authorize/prepare", json=_authz_body(cid, ch2))
+    assert p.json()["action"] == "redirect" and "code" in parse_qs(urlparse(p.json()["url"]).query)
+    # asking for a NEW scope not previously consented re-prompts
+    _, ch3 = _pkce()
+    p2 = client.post("/oauth/authorize/prepare",
+                     json=_authz_body(cid, ch3, scope="openid roles"))
+    assert p2.json()["action"] == "consent"
+
+
+def test_prepare_error_for_unsupported_response_type(client):
+    data = _make_client(client, trusted=False)
+    _, ch = _pkce()
+    r = client.post("/oauth/authorize/prepare",
+                    json=_authz_body(data["client_id"], ch, response_type="token"))
+    assert r.json()["action"] == "error"
+    assert parse_qs(urlparse(r.json()["url"]).query)["error"] == ["unsupported_response_type"]

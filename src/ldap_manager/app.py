@@ -23,6 +23,7 @@ from .webdav_policy import WebDavSessionPolicyStore
 from .oauth_store import OAuthClientStore
 from .oauth_codes import OAuthCodeStore
 from .oauth_keys import OAuthKeys
+from .oauth_consent import OAuthConsentStore
 from .routers import (admin_roles, admin_templates, admin_users, health, me,
                       public_auth, twofa, service_cred, oauth, admin_oauth)
 
@@ -46,6 +47,7 @@ def build_services(settings: Settings) -> Services:
         oauth_clients=OAuthClientStore(settings),
         oauth_codes=OAuthCodeStore(settings.redis_url),
         oauth_keys=OAuthKeys(settings.oauth_signing_key),
+        oauth_consent=OAuthConsentStore(settings),
     )
 
 

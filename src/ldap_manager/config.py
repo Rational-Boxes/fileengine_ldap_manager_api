@@ -111,6 +111,7 @@ class Settings:
     # server so CMS/web-portals, ONLYOFFICE, and service integrations delegate to it. ---
     oauth_enabled: bool = False               # master switch for the authority
     oauth_issuer: str = ""                     # public issuer URL (e.g. https://host/ldapadmin); required when enabled
+    oauth_authorize_ui: str = ""               # SPA authorize/consent route browsers hit; discovery's authorization_endpoint. Empty ⇒ the API's /oauth/authorize.
     oauth_signing_key: str = ""                # PEM RSA private key; empty ⇒ ephemeral dev key (warned)
     oauth_client_pepper: str = ""              # HMAC pepper for client secrets at rest (falls back to service_cred_pepper)
     oauth_code_ttl: int = 300                  # authorization-code lifetime (≤10 min)
@@ -184,6 +185,7 @@ def load_settings() -> "Settings":
         service_cred_internal_secret=_env("SERVICE_CRED_INTERNAL_SECRET", ""),
         oauth_enabled=_bool("OAUTH_ENABLED", False),
         oauth_issuer=_env("OAUTH_ISSUER", "").rstrip("/"),
+        oauth_authorize_ui=_env("OAUTH_AUTHORIZE_UI", "").rstrip("/"),
         oauth_signing_key=_env("OAUTH_SIGNING_KEY", ""),
         oauth_client_pepper=_env("OAUTH_CLIENT_SECRET_PEPPER", "") or _env("SERVICE_CRED_HASH_PEPPER", ""),
         oauth_code_ttl=_int("OAUTH_CODE_TTL", 300),
