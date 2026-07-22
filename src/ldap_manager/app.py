@@ -20,8 +20,11 @@ from .tokens import TokenStore
 from .twofa import TwoFactorStore, TwoFactorPolicyStore
 from .service_cred import ServiceCredentialStore
 from .webdav_policy import WebDavSessionPolicyStore
+from .oauth_store import OAuthClientStore
+from .oauth_codes import OAuthCodeStore
+from .oauth_keys import OAuthKeys
 from .routers import (admin_roles, admin_templates, admin_users, health, me,
-                      public_auth, twofa, service_cred)
+                      public_auth, twofa, service_cred, oauth, admin_oauth)
 
 
 def build_services(settings: Settings) -> Services:
@@ -40,6 +43,9 @@ def build_services(settings: Settings) -> Services:
         twofa_policy=TwoFactorPolicyStore(settings),
         service_cred=ServiceCredentialStore(settings),
         webdav_policy=WebDavSessionPolicyStore(settings),
+        oauth_clients=OAuthClientStore(settings),
+        oauth_codes=OAuthCodeStore(settings.redis_url),
+        oauth_keys=OAuthKeys(settings.oauth_signing_key),
     )
 
 
@@ -98,6 +104,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_templates.router)
     app.include_router(twofa.router)
     app.include_router(service_cred.router)
+    app.include_router(oauth.router)          # OAuth/OIDC authority (Phase 1.7)
+    app.include_router(admin_oauth.router)    # tenant-admin client registry
     return app
 
 

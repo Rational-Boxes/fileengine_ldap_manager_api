@@ -21,6 +21,9 @@ from .tokens import TokenStore
 from .twofa import TwoFactorStore, TwoFactorPolicyStore
 from .service_cred import ServiceCredentialStore
 from .webdav_policy import WebDavSessionPolicyStore
+from .oauth_store import OAuthClientStore
+from .oauth_codes import OAuthCodeStore
+from .oauth_keys import OAuthKeys
 
 
 @dataclass
@@ -38,6 +41,10 @@ class Services:
     twofa_policy: TwoFactorPolicyStore
     service_cred: ServiceCredentialStore
     webdav_policy: WebDavSessionPolicyStore
+    # OAuth 2.0 / OIDC authority (Phase 1.7)
+    oauth_clients: OAuthClientStore
+    oauth_codes: OAuthCodeStore
+    oauth_keys: OAuthKeys
 
 
 def services(request: Request) -> Services:

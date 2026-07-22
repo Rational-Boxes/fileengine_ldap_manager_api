@@ -107,6 +107,18 @@ class Settings:
     service_cred_max_per_user: int = 10       # per-user credential cap
     service_cred_internal_secret: str = ""    # guards /internal/service-cred/verify (falls back to mfa_internal_secret)
 
+    # --- OAuth 2.0 / OIDC authority (Phase 1.7) — FileEngine as an authorization
+    # server so CMS/web-portals, ONLYOFFICE, and service integrations delegate to it. ---
+    oauth_enabled: bool = False               # master switch for the authority
+    oauth_issuer: str = ""                     # public issuer URL (e.g. https://host/ldapadmin); required when enabled
+    oauth_signing_key: str = ""                # PEM RSA private key; empty ⇒ ephemeral dev key (warned)
+    oauth_client_pepper: str = ""              # HMAC pepper for client secrets at rest (falls back to service_cred_pepper)
+    oauth_code_ttl: int = 300                  # authorization-code lifetime (≤10 min)
+    oauth_access_ttl: int = 3600               # access-token lifetime
+    oauth_id_token_ttl: int = 3600             # ID-token lifetime
+    oauth_refresh_ttl: int = 1209600           # refresh-token lifetime (14 days)
+    oauth_max_clients_per_tenant: int = 50     # per-tenant registered-client cap
+
     # --- per-tenant WebDAV session TTL (PROPOSAL §14.10) ---
     webdav_session_ttl_default: int = 43200   # deployment default (12h) if a tenant sets no override
     webdav_session_ttl_min: int = 300         # clamp floor a tenant admin may pick (5m)
@@ -170,6 +182,15 @@ def load_settings() -> "Settings":
         service_cred_pepper=_env("SERVICE_CRED_HASH_PEPPER", ""),
         service_cred_max_per_user=_int("SERVICE_CRED_MAX_PER_USER", 10),
         service_cred_internal_secret=_env("SERVICE_CRED_INTERNAL_SECRET", ""),
+        oauth_enabled=_bool("OAUTH_ENABLED", False),
+        oauth_issuer=_env("OAUTH_ISSUER", "").rstrip("/"),
+        oauth_signing_key=_env("OAUTH_SIGNING_KEY", ""),
+        oauth_client_pepper=_env("OAUTH_CLIENT_SECRET_PEPPER", "") or _env("SERVICE_CRED_HASH_PEPPER", ""),
+        oauth_code_ttl=_int("OAUTH_CODE_TTL", 300),
+        oauth_access_ttl=_int("OAUTH_ACCESS_TTL", 3600),
+        oauth_id_token_ttl=_int("OAUTH_ID_TOKEN_TTL", 3600),
+        oauth_refresh_ttl=_int("OAUTH_REFRESH_TTL", 1209600),
+        oauth_max_clients_per_tenant=_int("OAUTH_MAX_CLIENTS_PER_TENANT", 50),
         webdav_session_ttl_default=_int("WEBDAV_IP_BIND_TTL_SECONDS", 43200),
         webdav_session_ttl_min=_int("WEBDAV_SESSION_TTL_MIN_SECONDS", 300),
         webdav_session_ttl_max=_int("WEBDAV_SESSION_TTL_MAX_SECONDS", 86400),
