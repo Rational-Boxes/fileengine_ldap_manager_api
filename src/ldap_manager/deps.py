@@ -24,6 +24,7 @@ from .webdav_policy import WebDavSessionPolicyStore
 from .oauth_store import OAuthClientStore
 from .oauth_codes import OAuthCodeStore
 from .oauth_keys import OAuthKeys
+from .oauth_consent import OAuthConsentStore
 
 
 @dataclass
@@ -45,6 +46,7 @@ class Services:
     oauth_clients: OAuthClientStore
     oauth_codes: OAuthCodeStore
     oauth_keys: OAuthKeys
+    oauth_consent: OAuthConsentStore
 
 
 def services(request: Request) -> Services:

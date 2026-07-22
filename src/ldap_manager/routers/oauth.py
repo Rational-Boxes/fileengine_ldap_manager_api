@@ -21,7 +21,7 @@ from __future__ import annotations
 import time
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, Form, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from .. import oauth_store, oauth_tokens
@@ -57,9 +57,12 @@ def _issuer(svc: Services) -> str:
 def discovery(svc: Services = Depends(services)) -> dict:
     _enabled_or_404(svc)
     iss = _issuer(svc)
+    # Browsers hit the SPA consent route (which brokers login + consent, then calls
+    # the prepare/decision APIs); it falls back to the direct API endpoint.
+    authz = svc.settings.oauth_authorize_ui or f"{iss}/oauth/authorize"
     return {
         "issuer": iss,
-        "authorization_endpoint": f"{iss}/oauth/authorize",
+        "authorization_endpoint": authz,
         "token_endpoint": f"{iss}/oauth/token",
         "userinfo_endpoint": f"{iss}/oauth/userinfo",
         "jwks_uri": f"{iss}/oauth/jwks.json",
@@ -82,14 +85,75 @@ def jwks(svc: Services = Depends(services)) -> dict:
 
 
 # --------------------------------- authorize --------------------------------
-def _redirect_error(redirect_uri: str, error: str, state: str, desc: str = "") -> RedirectResponse:
+class _AuthzError(Exception):
+    """A protocol error that must redirect back to the client's redirect_uri."""
+    def __init__(self, error: str, description: str = ""):
+        self.error = error
+        self.description = description
+
+
+def _resolve_authorize(svc: Services, *, client_id, redirect_uri, response_type,
+                       scope, code_challenge, code_challenge_method):
+    """Validate a request and return ``(client, granted_scopes)``. Raises
+    ``HTTPException(400)`` for non-redirectable errors (unvalidated client /
+    redirect_uri) and :class:`_AuthzError` for errors that redirect."""
+    client = svc.oauth_clients.get(client_id)
+    if client is None:
+        raise HTTPException(status_code=400, detail="invalid client_id")
+    if redirect_uri not in client.redirect_uris:
+        raise HTTPException(status_code=400, detail="redirect_uri not registered for this client")
+    if response_type != "code":
+        raise _AuthzError("unsupported_response_type")
+    if "authorization_code" not in client.grant_types:
+        raise _AuthzError("unauthorized_client")
+    granted = [s for s in (scope or "").split() if s and s in client.scopes]
+    if not granted:
+        raise _AuthzError("invalid_scope")
+    public = client.token_endpoint_auth_method == "none"
+    if public and not code_challenge:
+        raise _AuthzError("invalid_request", "code_challenge required")
+    if code_challenge and code_challenge_method not in ("S256", "plain"):
+        raise _AuthzError("invalid_request", "unsupported code_challenge_method")
+    return client, granted
+
+
+def _redirect_url(redirect_uri: str, params: dict) -> str:
+    sep = "&" if "?" in redirect_uri else "?"
+    return f"{redirect_uri}{sep}{urlencode(params)}"
+
+
+def _error_url(redirect_uri: str, error: str, state: str, desc: str = "") -> str:
     params = {"error": error}
     if desc:
         params["error_description"] = desc
     if state:
         params["state"] = state
-    sep = "&" if "?" in redirect_uri else "?"
-    return RedirectResponse(url=f"{redirect_uri}{sep}{urlencode(params)}", status_code=302)
+    return _redirect_url(redirect_uri, params)
+
+
+def _issue_code_url(svc: Services, client, granted, ident, *, redirect_uri, nonce,
+                    code_challenge, code_challenge_method, state) -> str:
+    profile = _lookup_profile(svc, ident.user)
+    payload = {
+        "client_id": client.client_id, "user": ident.user, "tenant": ident.tenant,
+        "redirect_uri": redirect_uri, "scope": " ".join(granted), "nonce": nonce,
+        "code_challenge": code_challenge, "code_challenge_method": code_challenge_method,
+        "auth_time": int(time.time()), "roles": list(ident.roles),
+        "email": profile["email"], "name": profile["name"],
+    }
+    code = svc.oauth_codes.issue_code(payload, svc.settings.oauth_code_ttl)
+    out = {"code": code}
+    if state:
+        out["state"] = state
+    return _redirect_url(redirect_uri, out)
+
+
+def _consent_remembered(svc: Services, ident, client, granted) -> bool:
+    try:
+        return svc.oauth_consent.enabled() and svc.oauth_consent.has(
+            ident.tenant, ident.user, client.client_id, granted)
+    except Exception:
+        return False
 
 
 @router.get("/oauth/authorize")
@@ -106,53 +170,98 @@ def authorize(
     svc: Services = Depends(services),
     ident=Depends(require_identity),
 ):
+    """Direct authorization endpoint (bearer-driven). Trusted clients (or a
+    remembered consent) get a code; untrusted clients without consent are bounced
+    with ``consent_required`` — the SPA drives the consent flow via the prepare /
+    decision endpoints below."""
     _enabled_or_404(svc)
     _require_stores(svc)
-    client = svc.oauth_clients.get(client_id)
-    # Errors that must NOT redirect (unvalidated client/redirect_uri) → 400.
-    if client is None:
-        raise HTTPException(status_code=400, detail="invalid client_id")
-    if redirect_uri not in client.redirect_uris:
-        raise HTTPException(status_code=400, detail="redirect_uri not registered for this client")
+    try:
+        client, granted = _resolve_authorize(
+            svc, client_id=client_id, redirect_uri=redirect_uri, response_type=response_type,
+            scope=scope, code_challenge=code_challenge, code_challenge_method=code_challenge_method)
+    except _AuthzError as e:
+        return RedirectResponse(_error_url(redirect_uri, e.error, state, e.description), status_code=302)
+    if not client.trusted and not _consent_remembered(svc, ident, client, granted):
+        return RedirectResponse(_error_url(redirect_uri, "consent_required", state), status_code=302)
+    url = _issue_code_url(svc, client, granted, ident, redirect_uri=redirect_uri, nonce=nonce,
+                          code_challenge=code_challenge, code_challenge_method=code_challenge_method,
+                          state=state)
+    return RedirectResponse(url=url, status_code=302)
 
-    # From here, protocol errors redirect back to the (validated) redirect_uri.
-    if response_type != "code":
-        return _redirect_error(redirect_uri, "unsupported_response_type", state)
-    if "authorization_code" not in client.grant_types:
-        return _redirect_error(redirect_uri, "unauthorized_client", state)
 
-    requested = [s for s in (scope or "").split() if s]
-    granted = [s for s in requested if s in client.scopes]
-    if not granted:
-        return _redirect_error(redirect_uri, "invalid_scope", state)
+@router.post("/oauth/authorize/prepare")
+def authorize_prepare(request: Request, body: dict = Body(...),
+                      svc: Services = Depends(services),
+                      ident=Depends(require_identity)) -> dict:
+    """SPA-brokered step 1: validate the request as the logged-in user and decide
+    whether consent is needed. Returns one of:
+      ``{action:"redirect", url}``  — trusted / already-consented → code issued
+      ``{action:"consent", client_name, scopes, redirect_uri}`` — show the screen
+      ``{action:"error", url}``     — a redirectable protocol error"""
+    _enabled_or_404(svc)
+    _require_stores(svc)
+    p = _authz_params(body)
+    try:
+        client, granted = _resolve_authorize(
+            svc, client_id=p["client_id"], redirect_uri=p["redirect_uri"],
+            response_type=p["response_type"], scope=p["scope"],
+            code_challenge=p["code_challenge"], code_challenge_method=p["code_challenge_method"])
+    except _AuthzError as e:
+        return {"action": "error", "url": _error_url(p["redirect_uri"], e.error, p["state"], e.description)}
+    if client.trusted or _consent_remembered(svc, ident, client, granted):
+        return {"action": "redirect", "url": _issue_code_url(
+            svc, client, granted, ident, redirect_uri=p["redirect_uri"], nonce=p["nonce"],
+            code_challenge=p["code_challenge"], code_challenge_method=p["code_challenge_method"],
+            state=p["state"])}
+    return {"action": "consent", "client_name": client.name or client.client_id,
+            "scopes": granted, "redirect_uri": p["redirect_uri"]}
 
-    # PKCE: mandatory for public clients; honored for confidential when supplied.
-    public = client.token_endpoint_auth_method == "none"
-    if public and not code_challenge:
-        return _redirect_error(redirect_uri, "invalid_request", state, "code_challenge required")
-    if code_challenge and code_challenge_method not in ("S256", "plain"):
-        return _redirect_error(redirect_uri, "invalid_request", state, "unsupported code_challenge_method")
 
-    # Consent: first-party (trusted) clients skip it; untrusted require the consent
-    # UI (frontend increment) and are refused until it exists.
-    if not client.trusted:
-        return _redirect_error(redirect_uri, "consent_required", state,
-                               "interactive consent not yet available for this client")
+@router.post("/oauth/authorize/decision")
+def authorize_decision(request: Request, body: dict = Body(...),
+                       svc: Services = Depends(services),
+                       ident=Depends(require_identity)) -> dict:
+    """SPA-brokered step 2: the user approved or denied. On approval, issue a code
+    (recording consent when ``remember``); on denial, redirect with ``access_denied``.
+    Always returns ``{action:"redirect", url}`` (or ``{action:"error", url}``)."""
+    _enabled_or_404(svc)
+    _require_stores(svc)
+    p = _authz_params(body)
+    approved = bool(body.get("approved"))
+    remember = bool(body.get("remember"))
+    try:
+        client, granted = _resolve_authorize(
+            svc, client_id=p["client_id"], redirect_uri=p["redirect_uri"],
+            response_type=p["response_type"], scope=p["scope"],
+            code_challenge=p["code_challenge"], code_challenge_method=p["code_challenge_method"])
+    except _AuthzError as e:
+        return {"action": "error", "url": _error_url(p["redirect_uri"], e.error, p["state"], e.description)}
+    if not approved:
+        return {"action": "redirect", "url": _error_url(p["redirect_uri"], "access_denied", p["state"])}
+    if remember and svc.oauth_consent.enabled():
+        try:
+            svc.oauth_consent.grant(ident.tenant, ident.user, client.client_id, granted)
+        except Exception:
+            pass
+    return {"action": "redirect", "url": _issue_code_url(
+        svc, client, granted, ident, redirect_uri=p["redirect_uri"], nonce=p["nonce"],
+        code_challenge=p["code_challenge"], code_challenge_method=p["code_challenge_method"],
+        state=p["state"])}
 
-    profile = _lookup_profile(svc, ident.user)
-    payload = {
-        "client_id": client.client_id, "user": ident.user, "tenant": ident.tenant,
-        "redirect_uri": redirect_uri, "scope": " ".join(granted), "nonce": nonce,
-        "code_challenge": code_challenge, "code_challenge_method": code_challenge_method,
-        "auth_time": int(time.time()), "roles": list(ident.roles),
-        "email": profile["email"], "name": profile["name"],
+
+def _authz_params(body: dict) -> dict:
+    """Pull the OAuth authorize params from a JSON body (SPA-brokered flow)."""
+    return {
+        "client_id": str(body.get("client_id") or ""),
+        "redirect_uri": str(body.get("redirect_uri") or ""),
+        "response_type": str(body.get("response_type") or "code"),
+        "scope": str(body.get("scope") or ""),
+        "state": str(body.get("state") or ""),
+        "nonce": str(body.get("nonce") or ""),
+        "code_challenge": str(body.get("code_challenge") or ""),
+        "code_challenge_method": str(body.get("code_challenge_method") or "S256"),
     }
-    code = svc.oauth_codes.issue_code(payload, svc.settings.oauth_code_ttl)
-    out = {"code": code}
-    if state:
-        out["state"] = state
-    sep = "&" if "?" in redirect_uri else "?"
-    return RedirectResponse(url=f"{redirect_uri}{sep}{urlencode(out)}", status_code=302)
 
 
 def _lookup_profile(svc: Services, uid: str) -> dict:
