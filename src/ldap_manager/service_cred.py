@@ -44,8 +44,9 @@ except Exception:  # pragma: no cover
 
 
 # The doors a credential may be scoped to. The scope set is the authoritative
-# control; the key_id prefix (below) is cosmetic (aids secret scanning).
-ALL_SCOPES = ("webdav", "mcp")
+# control; the key_id prefix (below) is cosmetic (aids secret scanning). "bcf" is
+# the BCF-API 2.1 door — a non-interactive gateway credential for BCF-XML sync.
+ALL_SCOPES = ("webdav", "mcp", "bcf")
 
 # Distinctive prefixes so leaked-credential scanners can flag exposure. The key_id
 # (public) rides in the Basic username; the secret (never stored in plaintext) is

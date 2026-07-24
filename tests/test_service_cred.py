@@ -38,6 +38,8 @@ def test_normalize_scopes():
     assert sc.normalize_scopes([]) == ["webdav"]                       # empty → default
     assert sc.normalize_scopes(["MCP", "mcp"]) == ["mcp"]              # lower-case + dedup
     assert sc.normalize_scopes(["mcp", "webdav"]) == ["webdav", "mcp"]  # stable order
+    assert sc.normalize_scopes(["bcf"]) == ["bcf"]                     # BCF-API door
+    assert sc.normalize_scopes(["bcf", "webdav"]) == ["webdav", "bcf"]  # stable order incl. bcf
     assert sc.normalize_scopes(["bogus"]) == ["webdav"]               # drop unknown → default
 
 
