@@ -13,6 +13,8 @@ dependencies = [
     "psycopg[binary]>=3.1",   # per-tenant email templates (§5.1)
     "redis>=5.0",             # invite + reset tokens (§5, §5.2)
     "cryptography>=42.0",     # Fernet encryption of TOTP secrets at rest (2FA, PROPOSAL §4)
+    "PyJWT>=2.0",             # OAuth access/refresh token signing (oauth_tokens.py)
+    "python-multipart>=0.0.6",# OAuth2 token endpoint reads form-encoded fields (routers/oauth.py)
 ]
 # The audit publisher (`audit_service.publisher`, from ../audit_service — the
 # fileengine_security_event_logger repo) is used for auth-category audit emission
