@@ -75,7 +75,7 @@ def _install_monitoring_allowlist(app: FastAPI) -> None:
     import os
     from fastapi.responses import JSONResponse
 
-    monitor_paths = {"/healthz", "/readyz", "/poolz"}
+    monitor_paths = {"/healthz", "/readyz", "/poolz", "/metrics"}
     allow = {ip.strip() for ip in
              os.environ.get("FILEENGINE_MONITORING_ALLOW_IPS", "").split(",") if ip.strip()}
 
@@ -96,6 +96,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description="Tenant user & role administration, self-service profile/password, invite/reset.",
     )
     _install_monitoring_allowlist(app)
+
+    # Prometheus scrape endpoint, behind the same allowlist as the other
+    # monitoring routes. Reports process and per-thread state so a stuck or
+    # leaking service is visible to the same scraper that watches the core.
+    from . import metrics as _fe_metrics
+    _fe_metrics.install(app, "ldap_manager", [], {"version": "0.1.0"})
     app.state.services = build_services(settings)
 
     _LDAP_HTTP = {"entryAlreadyExists": 409, "noSuchObject": 404,
