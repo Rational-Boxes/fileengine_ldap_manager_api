@@ -37,6 +37,7 @@ NEW_USER = "new_user"
 ACCESS_GRANTED = "access_granted"
 PASSWORD_RESET = "password_reset"   # system-level (not per-tenant)
 TWO_FA_EMAIL = "2fa_email_code"     # tenant-customizable one-time 2FA email code
+SHARE_OTP_EMAIL = "share_otp_code"  # one-time code for an outside share-link recipient
 
 # Allowed placeholders per kind (§5.1 / §5.2). A PUT with any others is rejected.
 ALLOWED: dict[str, set[str]] = {
@@ -44,9 +45,13 @@ ALLOWED: dict[str, set[str]] = {
     ACCESS_GRANTED: {"display_name", "email", "tenant", "app_link", "inviter", "roles"},
     PASSWORD_RESET: {"display_name", "email", "reset_link", "expires"},
     TWO_FA_EMAIL: {"display_name", "email", "code", "expires"},
+    # No `display_name`: the recipient has no account here, so there is no name
+    # to greet them by. `sender` is the link's creator -- the one piece of
+    # context that tells a stranger why an unfamiliar domain is mailing them.
+    SHARE_OTP_EMAIL: {"email", "code", "expires", "sender", "sent_at"},
 }
 
-TENANT_KINDS = (NEW_USER, ACCESS_GRANTED, TWO_FA_EMAIL)
+TENANT_KINDS = (NEW_USER, ACCESS_GRANTED, TWO_FA_EMAIL, SHARE_OTP_EMAIL)
 
 
 @dataclass
@@ -93,6 +98,29 @@ DEFAULTS: dict[str, Template] = {
             "<p>Your one-time sign-in code is <strong>{{code}}</strong>."
             " It expires in {{expires}}.</p>"
             "<p>If you didn't try to sign in, change your password immediately.</p>"
+        ),
+    ),
+    # The recipient of this mail has no account and did not ask us for anything
+    # -- they clicked a link someone sent them. So the copy has to do three jobs
+    # the 2FA mail does not: say who the link came from, say when the code was
+    # issued (a resend invalidates the previous one, so "use the newest" needs a
+    # way to tell them apart), and state the deadline plainly, because a silently
+    # stale code is indistinguishable from a mistyped one.
+    SHARE_OTP_EMAIL: Template(
+        # "the file" is wrong for the two folder shapes, and the body already
+        # hedges correctly ("a file or folder"). A subject line that contradicts
+        # its own body is the kind of small wrongness that makes a legitimate
+        # mail read as a phishing attempt -- which is the last impression this
+        # particular message can afford.
+        subject="Your code for what {{sender}} shared with you",
+        body=(
+            "<p>Your one-time code is <strong>{{code}}</strong>.</p>"
+            "<p>It expires in {{expires}} (sent {{sent_at}}). If you asked for"
+            " more than one code, use the one from the newest email.</p>"
+            "<p>This code was requested for a file or folder shared with"
+            " {{email}} by {{sender}}. If that means nothing to you, ignore this"
+            " message -- the code is useless on its own and we will not email"
+            " you again unless someone requests another.</p>"
         ),
     ),
 }

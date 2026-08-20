@@ -117,6 +117,25 @@ class Settings:
     mfa_rate_window_s: int = 300
     mfa_internal_secret: str = ""             # shared secret for http_bridge -> /internal/2fa/*
 
+    # --- outside share-link recipient OTP (share_service spec §6.9) ---
+    # A separate knob set from the 2FA one above, deliberately: the 2FA policy
+    # governs whether a TENANT's USERS may use email as a second factor, and it
+    # must not decide whether an outside recipient can open a share link. These
+    # are siblings of the 2FA settings, not reuses.
+    share_otp_ttl_s: int = 600                # 10 minutes (spec §9)
+    share_otp_max_attempts: int = 5           # wrong codes per (link,email) per window
+    share_otp_attempt_window_s: int = 900
+    share_otp_send_per_window: int = 3        # sends per (link,email)
+    share_otp_send_window_s: int = 900
+    share_otp_send_per_link_day: int = 20     # sends per link per day
+    # Rung 0 timing checks (spec §8.4): a submission cannot plausibly precede
+    # the mail that carries the code, and a human re-reads before retrying.
+    share_otp_min_seconds_after_send: int = 5
+    share_otp_min_submit_interval_ms: int = 1500
+    share_otp_timing_weight: int = 5          # how heavily a tripped check counts
+    share_recipient_ttl_s: int = 86400        # how long a verified recipient may open sessions
+    share_internal_secret: str = ""           # guards /internal/share/* (falls back to mfa_internal_secret)
+
     # --- service credentials (key:secret for the WebDAV/MCP doors, PROPOSAL §15/§16) ---
     service_cred_pepper: str = ""             # HMAC pepper for the secret at rest; unset ⇒ feature 503s
     service_cred_max_per_user: int = 10       # per-user credential cap
@@ -195,6 +214,17 @@ def load_settings() -> "Settings":
         mfa_rate_per_ip=_int("MFA_RATE_PER_IP", 5),
         mfa_rate_window_s=_int("MFA_RATE_WINDOW_S", 300),
         mfa_internal_secret=_env("MFA_INTERNAL_SECRET", ""),
+        share_otp_ttl_s=_int("SHARE_OTP_TTL_S", 600),
+        share_otp_max_attempts=_int("SHARE_OTP_MAX_ATTEMPTS", 5),
+        share_otp_attempt_window_s=_int("SHARE_OTP_ATTEMPT_WINDOW_S", 900),
+        share_otp_send_per_window=_int("SHARE_OTP_SEND_PER_WINDOW", 3),
+        share_otp_send_window_s=_int("SHARE_OTP_SEND_WINDOW_S", 900),
+        share_otp_send_per_link_day=_int("SHARE_OTP_SEND_PER_LINK_DAY", 20),
+        share_otp_min_seconds_after_send=_int("SHARE_OTP_MIN_SECONDS_AFTER_SEND", 5),
+        share_otp_min_submit_interval_ms=_int("SHARE_OTP_MIN_SUBMIT_INTERVAL_MS", 1500),
+        share_otp_timing_weight=_int("SHARE_OTP_TIMING_WEIGHT", 5),
+        share_recipient_ttl_s=_int("SHARE_RECIPIENT_TTL_S", 86400),
+        share_internal_secret=_env("SHARE_INTERNAL_SECRET", ""),
         service_cred_pepper=_env("SERVICE_CRED_HASH_PEPPER", ""),
         service_cred_max_per_user=_int("SERVICE_CRED_MAX_PER_USER", 10),
         service_cred_internal_secret=_env("SERVICE_CRED_INTERNAL_SECRET", ""),

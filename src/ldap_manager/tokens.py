@@ -87,6 +87,19 @@ class TokenStore:
         pipe.execute()
         return uid
 
+    def peek(self, kind: str, token: str) -> Optional[str]:
+        """The ``uid`` a token belongs to, WITHOUT consuming it.
+
+        For credentials that are deliberately reusable inside their TTL -- the
+        share-link recipient token, which may open several sessions -- where
+        ``consume`` would burn it on first use."""
+        if self._r is None or not token:
+            return None
+        raw = self._r.get(self._key(kind, token))
+        if raw is None:
+            return None
+        return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+
     def revoke_all_for(self, uid: str) -> None:
         """Invalidate every outstanding invite/reset token for a user after a
         successful password set (§5.2), via the per-uid index."""
@@ -124,6 +137,23 @@ class TokenStore:
             self._r.delete(key)
             return True
         return False
+
+    def set_marker(self, key: str, value: str, ttl_seconds: int) -> None:
+        """Store a small opaque value with a TTL (share-link OTP timing checks).
+
+        Not a credential and not hashed: these hold send/attempt *timestamps*,
+        which have to be readable to be compared. No-op when Redis is off."""
+        if self._r is not None:
+            self._r.setex(f"ldapmgr:marker:{key}", ttl_seconds, value)
+
+    def get_marker(self, key: str) -> Optional[str]:
+        """The value set by :meth:`set_marker`, or None if absent/expired."""
+        if self._r is None:
+            return None
+        raw = self._r.get(f"ldapmgr:marker:{key}")
+        if raw is None:
+            return None
+        return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
 
     def rate_ok(self, bucket: str, limit: int, window_s: int) -> bool:
         """Fixed-window rate limit: True if ``bucket`` is under ``limit`` in the
