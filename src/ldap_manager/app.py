@@ -40,7 +40,7 @@ from .oauth_codes import OAuthCodeStore
 from .oauth_keys import OAuthKeys
 from .oauth_consent import OAuthConsentStore
 from .routers import (admin_roles, admin_templates, admin_users, health, me,
-                      public_auth, twofa, service_cred, oauth, admin_oauth)
+                      public_auth, twofa, service_cred, share_otp, oauth, admin_oauth)
 
 
 def build_services(settings: Settings) -> Services:
@@ -126,6 +126,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_roles.router)
     app.include_router(admin_templates.router)
     app.include_router(twofa.router)
+    app.include_router(share_otp.router)  # outside share-link recipient OTP
     app.include_router(service_cred.router)
     app.include_router(oauth.router)          # OAuth/OIDC authority (Phase 1.7)
     app.include_router(admin_oauth.router)    # tenant-admin client registry

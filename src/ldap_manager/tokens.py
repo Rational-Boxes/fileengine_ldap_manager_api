@@ -125,6 +125,23 @@ class TokenStore:
             return True
         return False
 
+    def set_marker(self, key: str, value: str, ttl_seconds: int) -> None:
+        """Store a small opaque value with a TTL (share-link OTP timing checks).
+
+        Not a credential and not hashed: these hold send/attempt *timestamps*,
+        which have to be readable to be compared. No-op when Redis is off."""
+        if self._r is not None:
+            self._r.setex(f"ldapmgr:marker:{key}", ttl_seconds, value)
+
+    def get_marker(self, key: str) -> Optional[str]:
+        """The value set by :meth:`set_marker`, or None if absent/expired."""
+        if self._r is None:
+            return None
+        raw = self._r.get(f"ldapmgr:marker:{key}")
+        if raw is None:
+            return None
+        return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+
     def rate_ok(self, bucket: str, limit: int, window_s: int) -> bool:
         """Fixed-window rate limit: True if ``bucket`` is under ``limit`` in the
         current ``window_s``. No-op (allow) when Redis is off or limit<=0."""
