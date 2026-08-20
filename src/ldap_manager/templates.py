@@ -107,7 +107,12 @@ DEFAULTS: dict[str, Template] = {
     # way to tell them apart), and state the deadline plainly, because a silently
     # stale code is indistinguishable from a mistyped one.
     SHARE_OTP_EMAIL: Template(
-        subject="Your code for the file {{sender}} shared",
+        # "the file" is wrong for the two folder shapes, and the body already
+        # hedges correctly ("a file or folder"). A subject line that contradicts
+        # its own body is the kind of small wrongness that makes a legitimate
+        # mail read as a phishing attempt -- which is the last impression this
+        # particular message can afford.
+        subject="Your code for what {{sender}} shared with you",
         body=(
             "<p>Your one-time code is <strong>{{code}}</strong>.</p>"
             "<p>It expires in {{expires}} (sent {{sent_at}}). If you asked for"
