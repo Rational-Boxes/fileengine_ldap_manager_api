@@ -133,6 +133,7 @@ class Settings:
     share_otp_min_seconds_after_send: int = 5
     share_otp_min_submit_interval_ms: int = 1500
     share_otp_timing_weight: int = 5          # how heavily a tripped check counts
+    share_recipient_ttl_s: int = 86400        # how long a verified recipient may open sessions
     share_internal_secret: str = ""           # guards /internal/share/* (falls back to mfa_internal_secret)
 
     # --- service credentials (key:secret for the WebDAV/MCP doors, PROPOSAL §15/§16) ---
@@ -222,6 +223,7 @@ def load_settings() -> "Settings":
         share_otp_min_seconds_after_send=_int("SHARE_OTP_MIN_SECONDS_AFTER_SEND", 5),
         share_otp_min_submit_interval_ms=_int("SHARE_OTP_MIN_SUBMIT_INTERVAL_MS", 1500),
         share_otp_timing_weight=_int("SHARE_OTP_TIMING_WEIGHT", 5),
+        share_recipient_ttl_s=_int("SHARE_RECIPIENT_TTL_S", 86400),
         share_internal_secret=_env("SHARE_INTERNAL_SECRET", ""),
         service_cred_pepper=_env("SERVICE_CRED_HASH_PEPPER", ""),
         service_cred_max_per_user=_int("SERVICE_CRED_MAX_PER_USER", 10),

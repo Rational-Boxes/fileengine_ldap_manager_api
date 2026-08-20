@@ -66,6 +66,9 @@ router = APIRouter()
 # TokenStore kind. Keyed by "{link_uid}|{email}" so one recipient's challenge on
 # one link is independent of every other.
 KIND = "share_otp"
+# The recipient token: proof that an address passed the challenge. Separate kind
+# so revoking codes and revoking sessions stay independent.
+RECIPIENT_KIND = "share_recipient"
 
 
 def require_internal(svc: Services = Depends(services),
@@ -225,10 +228,47 @@ def share_email_verify(body: VerifyIn, svc: Services = Depends(services),
                 "timing_flag": timing_flag}
 
     ok = bool(svc.tokens.consume_code(KIND, uid, body.code))
+
+    # On success, mint the RECIPIENT TOKEN here rather than in share_service.
+    #
+    # It is a verification artifact -- "this address proved control recently" --
+    # with the same lifecycle as the code that produced it, so it belongs in the
+    # same store. Keeping it out of share_service process memory is not a
+    # preference: that service is replicated, and a token minted on replica A
+    # would be unknown on replica B, where the failure is a generic 404 and the
+    # symptom is "the link works sometimes" (spec §7.4). The same trap
+    # ReplayGuard's own header names.
+    token = None
+    if ok:
+        token = svc.tokens.issue(RECIPIENT_KIND, uid, s.share_recipient_ttl_s)
+
     svc.audit.emit(action="share_link_challenge_verified" if ok
                    else "share_link_challenge_failed",
                    outcome="ok" if ok else "denied",
                    actor=body.email, tenant=body.tenant, category="auth",
                    detail={"link_uid": body.link_uid,
                            **({"timing": timing_flag} if timing_flag else {})})
-    return {"ok": ok, "locked": False, "timing_flag": timing_flag}
+    return {"ok": ok, "locked": False, "timing_flag": timing_flag,
+            **({"recipient_token": token,
+                "expires_in": s.share_recipient_ttl_s} if token else {})}
+
+
+class TokenCheckIn(BaseModel):
+    link_uid: str
+    email: str
+    token: str
+
+
+@router.post("/internal/share/token-check")
+def share_token_check(body: TokenCheckIn, svc: Services = Depends(services),
+                      _: None = Depends(require_internal)) -> dict:
+    """Is this recipient token live, and does it belong to this (link, address)?
+
+    Deliberately NOT single-use: a verified recipient may open more than one
+    session inside the window (a re-download after a dropped connection),
+    bounded by the link's own use budget rather than by this token. Binding is
+    checked rather than assumed -- a token for one link must not open another,
+    even though both were minted by the same store."""
+    expected = _uid(body.link_uid, body.email)
+    holder = svc.tokens.peek(RECIPIENT_KIND, body.token)
+    return {"ok": bool(holder) and secrets.compare_digest(holder or "", expected)}

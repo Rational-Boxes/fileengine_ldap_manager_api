@@ -264,3 +264,48 @@ def test_smtp_failure_is_surfaced_not_swallowed(client):
     assert r["sent"] is False
     assert "error" in r and "smtp refused" in r["error"]
     assert r["error"] != "rate_limited"     # distinguishable from a throttle
+
+
+# --- the recipient token --------------------------------------------------
+
+def test_verify_issues_a_recipient_token_bound_to_link_and_address(client):
+    """Minted here rather than in share_service: that service is replicated, and
+    a token held in one replica's memory is unknown to the next, where the
+    failure is a generic 404 (spec §7.4)."""
+    link = _link()
+    _challenge(client, link)
+    r = _verify(client, link, client._mailer.last_code()).json()
+    assert r["ok"] is True
+    token = r["recipient_token"]
+    assert token and r["expires_in"] > 0
+
+    def check(l, e, t):
+        return client.post("/internal/share/token-check", headers=_hdr(),
+                           json={"link_uid": l, "email": e, "token": t}).json()["ok"]
+
+    assert check(link, "recipient@example.com", token) is True
+    # Bound to BOTH halves: neither another link nor another address may use it.
+    assert check(_link(), "recipient@example.com", token) is False
+    assert check(link, "someone-else@example.com", token) is False
+    assert check(link, "recipient@example.com", "not-a-token") is False
+
+
+def test_the_recipient_token_is_reusable_within_its_window(client):
+    """Not single-use, deliberately: a verified recipient may open more than one
+    session (a re-download after a dropped connection), bounded by the link's
+    own use budget rather than by this token."""
+    link = _link()
+    _challenge(client, link)
+    token = _verify(client, link, client._mailer.last_code()).json()["recipient_token"]
+    for _ in range(3):
+        r = client.post("/internal/share/token-check", headers=_hdr(),
+                        json={"link_uid": link, "email": "recipient@example.com",
+                              "token": token})
+        assert r.json()["ok"] is True
+
+
+def test_a_failed_verify_issues_no_token(client):
+    link = _link()
+    _challenge(client, link)
+    r = _verify(client, link, "000000").json()
+    assert r["ok"] is False and "recipient_token" not in r

@@ -87,6 +87,19 @@ class TokenStore:
         pipe.execute()
         return uid
 
+    def peek(self, kind: str, token: str) -> Optional[str]:
+        """The ``uid`` a token belongs to, WITHOUT consuming it.
+
+        For credentials that are deliberately reusable inside their TTL -- the
+        share-link recipient token, which may open several sessions -- where
+        ``consume`` would burn it on first use."""
+        if self._r is None or not token:
+            return None
+        raw = self._r.get(self._key(kind, token))
+        if raw is None:
+            return None
+        return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+
     def revoke_all_for(self, uid: str) -> None:
         """Invalidate every outstanding invite/reset token for a user after a
         successful password set (§5.2), via the per-uid index."""
