@@ -95,5 +95,24 @@ def send_test(kind: str, svc: Services = Depends(services), ident: Identity = De
     if not svc.mailer.enabled:
         raise HTTPException(status_code=503, detail="SMTP not configured")
     t = svc.templates.get(ident.tenant, kind)
-    svc.mailer.send(ident.user, "[test] " + email_mod.render(t.subject, _SAMPLE),
+
+    # ident.user is a UID, not an address. Handing it to the mailer put a bare
+    # username in RCPT TO, which a real relay rejects outright:
+    #     SMTPRecipientsRefused: {'james': (501, 'Invalid RCPT TO address provided')}
+    # surfacing as a 500 from this endpoint. It only worked against relays that
+    # accept anything, so the shape of the bug was invisible in dev.
+    #
+    # Resolve the caller's mail attribute instead. get_user() falls back to the
+    # uid when the directory has no mail, which would put us right back where we
+    # started — so require an address that at least looks like one, and say so
+    # plainly rather than failing inside smtplib.
+    caller = svc.ldap.get_user(ident.user)
+    to_addr = (getattr(caller, "email", "") or "").strip()
+    if "@" not in to_addr:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"{ident.user} has no usable mail attribute in the directory, "
+                    "so there is nowhere to send the test."))
+
+    svc.mailer.send(to_addr, "[test] " + email_mod.render(t.subject, _SAMPLE),
                     email_mod.render(t.body, _SAMPLE))
