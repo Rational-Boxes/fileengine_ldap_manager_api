@@ -105,7 +105,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.services = build_services(settings)
 
     _LDAP_HTTP = {"entryAlreadyExists": 409, "noSuchObject": 404,
-                  "insufficientAccessRights": 403, "constraintViolation": 422}
+                  "insufficientAccessRights": 403, "constraintViolation": 422,
+                  # OUR misconfiguration, not the caller's: 389-DS refuses the
+                  # RFC 3062 Password Modify extended operation over a plaintext
+                  # connection. It reached us as an unmapped LdapError and so
+                  # went out as a bare 502, which reads like a crashed upstream
+                  # and sent the investigation to nginx instead of to the LDAP
+                  # URL scheme. 500 with a named cause is the honest answer.
+                  "confidentialityRequired": 500,
+                  # Same family: the directory rejects the bind or the operation
+                  # for a policy reason we cannot fix by retrying.
+                  "strongerAuthRequired": 500,
+                  "unwillingToPerform": 500}
 
     @app.exception_handler(MasterUnavailable)
     async def _master_down(_req: Request, exc: MasterUnavailable):
