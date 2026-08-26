@@ -51,7 +51,21 @@ def _set_password_or_422(svc: Services, uid: str, password: str) -> None:
 
 @router.post("/invite/accept")
 def invite_accept(body: InviteAccept, svc: Services = Depends(services)) -> dict:
-    uid = svc.tokens.consume(tok.INVITE, body.token)
+    # peek, not consume: the token must survive a FAILED attempt.
+    #
+    # Consuming first meant any failure after this line — a password the policy
+    # rejects, or the directory refusing the write — destroyed the invitation.
+    # The user saw an error, pressed the button again, and got "invalid or
+    # expired token" for a link that had been valid seconds earlier, with no way
+    # back except asking an administrator for a new one. That is exactly what
+    # happened while the directory was refusing password changes over a
+    # plaintext connection: one 502, and the invite was gone.
+    #
+    # Nothing is leaked by leaving it valid: whoever is calling already holds it.
+    # A SUCCESSFUL set revokes it anyway — _set_password_or_422 ends in
+    # revoke_all_for(uid), which clears every outstanding invite and reset token
+    # for that user — so the token still cannot be replayed.
+    uid = svc.tokens.peek(tok.INVITE, body.token)
     if not uid:
         raise HTTPException(status_code=400, detail="invalid or expired token")
     _set_password_or_422(svc, uid, body.password)
@@ -103,7 +117,10 @@ def reset_request(body: ResetRequest, request: Request, svc: Services = Depends(
 @router.post("/reset/confirm")
 def reset_confirm(body: ResetConfirm, request: Request, svc: Services = Depends(services)) -> dict:
     ip = client_ip(request)
-    uid = svc.tokens.consume(tok.RESET, body.token)
+    # peek, not consume — same reason as invite/accept above, and more likely to
+    # bite here: a password that fails the complexity policy is an ordinary
+    # first attempt, and it used to kill the reset link on the way out.
+    uid = svc.tokens.peek(tok.RESET, body.token)
     if not uid:
         # An invalid/expired reset token is a security signal (a guessed or replayed
         # token) — record the failed completion (best-effort; global scope, no tenant).
