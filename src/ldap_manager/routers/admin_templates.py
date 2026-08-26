@@ -86,7 +86,7 @@ def preview(kind: str, body: TemplateUpdate | None = None, svc: Services = Depen
             validate(kind, subject, html)
         except TemplateError as e:
             raise HTTPException(status_code=422, detail=str(e))
-    return {"subject": email_mod.render(subject, _SAMPLE), "body": email_mod.render(html, _SAMPLE)}
+    return {"subject": email_mod.render_subject(subject, _SAMPLE), "body": email_mod.render(html, _SAMPLE)}
 
 
 @router.post("/{kind}/test", status_code=204)
@@ -114,5 +114,5 @@ def send_test(kind: str, svc: Services = Depends(services), ident: Identity = De
             detail=(f"{ident.user} has no usable mail attribute in the directory, "
                     "so there is nowhere to send the test."))
 
-    svc.mailer.send(to_addr, "[test] " + email_mod.render(t.subject, _SAMPLE),
+    svc.mailer.send(to_addr, "[test] " + email_mod.render_subject(t.subject, _SAMPLE),
                     email_mod.render(t.body, _SAMPLE))

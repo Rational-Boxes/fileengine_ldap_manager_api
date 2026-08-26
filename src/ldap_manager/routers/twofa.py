@@ -224,7 +224,7 @@ def internal_email_challenge(body: UserTenantIn, svc: Services = Depends(service
         tmpl = svc.templates.get(body.tenant, TWO_FA_EMAIL)
         ctx = {"display_name": body.uid, "email": body.uid, "code": code,
                "expires": f"{svc.settings.mfa_email_ttl_s // 60} minutes"}
-        subject = email_mod.render(tmpl.subject, ctx)
+        subject = email_mod.render_subject(tmpl.subject, ctx)
         html = email_mod.render(tmpl.body, ctx)
         svc.mailer.send(body.uid, subject, html)
         sent = True

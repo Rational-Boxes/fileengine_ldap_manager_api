@@ -106,7 +106,10 @@ def _send_invite(svc: Services, ident: Identity, uid: str, display_name: str, ro
     token = svc.tokens.issue(tok.INVITE, uid, svc.settings.invite_ttl_hours * 3600)
     tmpl = svc.templates.get(ident.tenant, NEW_USER)
     link = f"{svc.settings.invite_link_base}?token={token}"
-    html = email_mod.render(tmpl.body, {
+    # One context, rendered into BOTH parts. The subject used to be passed
+    # straight through, so the default "You've been invited to {{tenant}}"
+    # arrived in the inbox with the braces still in it.
+    ctx = {
         "display_name": display_name or uid,
         "email": uid,
         "tenant": ident.tenant,
@@ -114,5 +117,6 @@ def _send_invite(svc: Services, ident: Identity, uid: str, display_name: str, ro
         "expires": f"{svc.settings.invite_ttl_hours}h",
         "inviter": ident.user,
         "roles": ", ".join(roles) or "—",
-    })
-    svc.mailer.send(uid, tmpl.subject, html)
+    }
+    svc.mailer.send(uid, email_mod.render_subject(tmpl.subject, ctx),
+                    email_mod.render(tmpl.body, ctx))
