@@ -34,10 +34,41 @@ _PLACEHOLDER = re.compile(r"\{\{\s*([a-z_]+)\s*\}\}")
 def render(template_body: str, values: dict[str, str]) -> str:
     """Substitute ``{{key}}`` placeholders with HTML-escaped values. Unknown
     placeholders render empty (they are rejected at save-time by the template
-    store, so this is defensive)."""
+    store, so this is defensive).
+
+    For a SUBJECT line use :func:`render_subject` — see why there."""
     def repl(m: "re.Match[str]") -> str:
         return html.escape(str(values.get(m.group(1), "")))
     return _PLACEHOLDER.sub(repl, template_body or "")
+
+
+#: Anything that would break a subject out of its header. CR and LF are the
+#: injection vector; the rest are control characters with no business in a
+#: header at all.
+_HEADER_UNSAFE = re.compile(r"[\r\n\t\x00-\x1f\x7f]+")
+
+
+def render_subject(template_subject: str, values: dict[str, str]) -> str:
+    """Substitute ``{{key}}`` placeholders for a mail SUBJECT.
+
+    Not :func:`render`, for two reasons, both of which show up in a real inbox:
+
+    * **A subject is not HTML.** Escaping there is not a safety measure, it is a
+      corruption: a tenant called ``Smith & Co`` arrives as ``Smith &amp; Co``
+      and a user called ``O'Brien`` as ``O&#x27;Brien``.
+    * **A subject IS a header.** A value carrying CR/LF is the classic header
+      injection (``…\\r\\nBcc: someone``). ``EmailMessage`` refuses such a header,
+      so this is not exploitable — but it refuses by raising, and two of the send
+      sites swallow exceptions, so the real-world effect of an apostrophe-free
+      tenant name with a stray newline is an email that silently never arrives.
+      Folding them to a space keeps the message sendable and single-line.
+
+    Only substituted VALUES are sanitized; the template text is the
+    administrator's own and is validated when saved.
+    """
+    def repl(m: "re.Match[str]") -> str:
+        return _HEADER_UNSAFE.sub(" ", str(values.get(m.group(1), ""))).strip()
+    return _PLACEHOLDER.sub(repl, template_subject or "")
 
 
 def placeholders_in(body: str) -> set[str]:

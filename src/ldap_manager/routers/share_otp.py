@@ -157,7 +157,7 @@ def share_email_challenge(body: ChallengeIn, svc: Services = Depends(services),
                "expires": f"{s.share_otp_ttl_s // 60} minutes",
                "sender": body.sender or "someone at your correspondent's organization",
                "sent_at": time.strftime("%H:%M UTC", time.gmtime(now))}
-        svc.mailer.send(body.email, email_mod.render(tmpl.subject, ctx),
+        svc.mailer.send(body.email, email_mod.render_subject(tmpl.subject, ctx),
                         email_mod.render(tmpl.body, ctx))
         sent = True
     except Exception as e:  # noqa: BLE001 - reported, never swallowed

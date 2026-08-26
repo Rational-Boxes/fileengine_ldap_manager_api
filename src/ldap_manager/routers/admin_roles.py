@@ -99,15 +99,18 @@ def _notify_access_granted(svc: Services, ident: Identity, uid: str, role: str) 
     from .. import email as email_mod
     tmpl = svc.templates.get(ident.tenant, ACCESS_GRANTED)
     user = svc.ldap.get_user(uid) or {}
-    html = email_mod.render(tmpl.body, {
+    # Subject and body share one context; the subject used to skip render() and
+    # go out as "You've been granted access to {{tenant}}".
+    ctx = {
         "display_name": user.get("display_name", uid),
         "email": uid,
         "tenant": ident.tenant,
         "app_link": svc.settings.invite_link_base or "",
         "inviter": ident.user,
         "roles": role,
-    })
+    }
     try:
-        svc.mailer.send(uid, tmpl.subject, html)
+        svc.mailer.send(uid, email_mod.render_subject(tmpl.subject, ctx),
+                        email_mod.render(tmpl.body, ctx))
     except Exception:
         pass

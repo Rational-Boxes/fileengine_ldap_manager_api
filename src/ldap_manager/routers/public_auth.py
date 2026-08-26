@@ -84,13 +84,17 @@ def reset_request(body: ResetRequest, request: Request, svc: Services = Depends(
             token = svc.tokens.issue(tok.RESET, user["uid"], svc.settings.reset_ttl_hours * 3600)
             tmpl = DEFAULTS[PASSWORD_RESET]  # system-level template (§5.2)
             link = f"{svc.settings.reset_link_base}?token={token}"
-            html = email_mod.render(tmpl.body, {
+            # The stock reset subject carries no placeholders, so this one was
+            # not visibly broken — but it skipped render() like the other two,
+            # which made it a trap for the first person to customize it.
+            ctx = {
                 "display_name": user.get("display_name", user["uid"]),
                 "email": user["uid"],
                 "reset_link": link,
                 "expires": f"{svc.settings.reset_ttl_hours}h",
-            })
-            svc.mailer.send(user["uid"], tmpl.subject, html)
+            }
+            svc.mailer.send(user["uid"], email_mod.render_subject(tmpl.subject, ctx),
+                            email_mod.render(tmpl.body, ctx))
     except Exception:
         pass
     return {"status": "ok"}
