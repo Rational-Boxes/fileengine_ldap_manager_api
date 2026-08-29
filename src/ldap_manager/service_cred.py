@@ -209,6 +209,15 @@ class ServiceCredentialStore:
             conn.commit()
         return out_key, secret
 
+    def revoke_all(self, uid: str) -> int:
+        """Drop every credential a user holds — used when their account is deleted,
+        so no WebDAV/MCP key outlives the account it authenticates."""
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM service_credential WHERE uid=%s", (uid,))
+            deleted = cur.rowcount
+            conn.commit()
+        return int(deleted or 0)
+
     def revoke(self, *, key_id: str, uid: str) -> bool:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM service_credential WHERE key_id=%s AND uid=%s", (key_id, uid))

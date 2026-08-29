@@ -20,7 +20,8 @@ import pytest
 
 from ldap_manager.config import Settings
 from ldap_manager.failover import CircuitBreaker, MasterUnavailable
-from ldap_manager.ldap_client import LdapClient, _uid_from_dn
+from ldap_manager.ldap_client import (LdapClient, _split_dn, _tenant_from_role_dn,
+                                      _uid_from_dn)
 
 
 def _client(**over) -> LdapClient:
@@ -43,6 +44,23 @@ def test_dns_derive_from_overridden_bases():
 
 def test_uid_from_dn():
     assert _uid_from_dn("uid=bob@x,ou=people,dc=x,dc=y") == "bob@x"
+
+
+def test_uid_from_dn_unescapes_so_it_round_trips_back_into_user_dn():
+    c = _client()
+    dn = c.user_dn("o'brien,jr@x")            # a comma in the uid is escaped in the DN
+    assert _uid_from_dn(dn) == "o'brien,jr@x"
+    assert c.user_dn(_uid_from_dn(dn)) == dn
+
+
+def test_split_dn_keeps_escaped_commas_inside_one_rdn():
+    assert _split_dn("uid=a\\,b,ou=people,dc=x") == ["uid=a\\,b", "ou=people", "dc=x"]
+
+
+def test_tenant_from_role_dn():
+    assert _tenant_from_role_dn("cn=editors,ou=acme,ou=tenants,dc=x,dc=y") == "acme"
+    assert _tenant_from_role_dn("cn=editors,ou=big\\,co,ou=tenants,dc=x") == "big,co"
+    assert _tenant_from_role_dn("uid=bob,ou=people,dc=x") == "people"  # first ou wins
 
 
 def test_single_server_uses_only_master_for_reads_and_writes():

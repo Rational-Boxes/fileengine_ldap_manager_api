@@ -50,6 +50,49 @@ class UserOut(BaseModel):
     in_this_tenant: Optional[bool] = None
 
 
+class RosterUserOut(BaseModel):
+    """One row of the tenant roster (§6.1) — the tenant's own membership, so the
+    roles held *here* come with it. ``orphaned`` marks a role member whose global
+    user entry no longer exists."""
+    uid: str
+    email: str
+    display_name: str = ""
+    roles: list[str] = Field(default_factory=list)
+    is_admin: bool = False
+    orphaned: bool = False
+
+
+class AdminUserDetail(BaseModel):
+    """A tenant member's profile as an admin sees it. ``other_tenant_count`` is a
+    count, never the names: which *other* tenants a user belongs to is not this
+    tenant admin's business, but the number is what makes the delete guard
+    explicable ("belongs to 2 other tenants")."""
+    uid: str
+    email: str
+    display_name: str = ""
+    given_name: str = ""
+    surname: str = ""
+    avatar_url: str = ""
+    tenant: str = ""
+    roles: list[str] = Field(default_factory=list)
+    is_admin: bool = False
+    other_tenant_count: int = 0
+    can_delete_account: bool = False
+
+
+class UserRolesUpdate(BaseModel):
+    """The complete set of roles the user should hold in this tenant — the server
+    diffs against what they hold now, so the client never has to."""
+    roles: list[str] = Field(default_factory=list)
+
+
+class UserRemoveOut(BaseModel):
+    uid: str
+    scope: str                      # "tenant" | "system"
+    roles_removed: list[str] = Field(default_factory=list)
+    account_deleted: bool = False
+
+
 # --- self-service profile (/v1/me) ---
 class ProfileOut(BaseModel):
     uid: str

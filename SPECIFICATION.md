@@ -109,14 +109,27 @@ the defaults; a deployment overrides them via `FILEENGINE_LDAP_DOMAIN`,
 
 Scoped to their own `ou=<tenant>`:
 - **Roles:** list / create / delete role groups; add/remove members.
-- **Users:** look up global users (exact match, §6), create new global users (via
-  the invite flow, §5), and assign/unassign users to this tenant's roles.
+- **Users:** list the tenant's own roster (§6.1), look up global users (exact
+  match, §6), create new global users (via the invite flow, §5), view a member's
+  profile, and assign/unassign users to this tenant's roles.
 - **`administrators` group (decision):** may add/remove members **except
   themselves** (no self-removal → prevents lockout), and the **last administrator
   cannot be removed** (last-admin guard). The `administrators` group itself cannot
   be deleted.
-- **Not allowed:** deleting/renaming/disabling global user accounts (they may
-  belong to other tenants), editing other tenants' `ou`s, creating/deleting
+- **Removing a user (decision) — two scopes.** Users are global, so "remove" is
+  ambiguous and the API makes the caller say which they mean:
+  - `scope=tenant` (default): drop every role they hold here. They lose all access
+    to this tenant; the global account survives for whatever other tenants use it.
+  - `scope=system`: the above, **and** delete the global account — permitted only
+    when **no other tenant holds a role on it** (otherwise `409`). Deleting the
+    account also purges its 2FA enrollment and every WebDAV/MCP service
+    credential, so nothing outlives the account it authenticated.
+  Both scopes are subject to the self-removal and last-administrator guards.
+  Files the user created are **not** touched: ownership is the core's record, not
+  the directory's, and a tenant admin deleting an account must not silently delete
+  the tenant's content with it.
+- **Not allowed:** renaming/disabling global user accounts, deleting an account
+  another tenant still uses, editing other tenants' `ou`s, creating/deleting
   tenants, or changing user attributes beyond display name + role membership.
 
 ## 5. User notification emails (two kinds, per-tenant templates)
@@ -245,6 +258,21 @@ across tenants. Lookup is therefore **exact email/uid** (or a **≥3-char prefix
 returns limited fields (`uid`, display name, whether already in this tenant), and
 is capped + rate-limited. No full enumeration.
 
+### 6.1 The tenant roster (not an exception to the above)
+
+`GET /v1/admin/users/roster` returns every user holding a role in the **caller's
+own tenant**, with the roles they hold there. That is not directory enumeration:
+a tenant admin already learns exactly this list by walking their roles one at a
+time, so serving it in one call adds no information — it only stops the UI from
+making N requests to rebuild it. Nothing outside the caller's `ou` is reachable
+through it.
+
+The full profile (`GET /v1/admin/users/{uid}/profile`) is likewise limited to the
+tenant's **own members**; a global user who holds no role here answers `404`, not
+`403`, because "exists, but not yours" is itself a directory leak. Membership of
+*other* tenants is reported as a **count only**, never as names — enough to
+explain why an account cannot be deleted, without disclosing who else uses it.
+
 ## 7. API surface (v1, JSON; every route scoped to the caller's tenant)
 
 | Method & path | Purpose |
@@ -255,8 +283,12 @@ is capped + rate-limited. No full enumeration.
 | `GET /v1/admin/roles/{role}/members` | list members |
 | `POST /v1/admin/roles/{role}/members` `{uid}` | add an existing user to the role (may trigger the `access_granted` email, §5-B) |
 | `DELETE /v1/admin/roles/{role}/members/{uid}` | remove (admins: not self / not last) |
+| `GET /v1/admin/users/roster` | the tenant's full user roster, each with the roles they hold here (§6.1) |
 | `GET /v1/admin/users?query=<exact/prefix>` | look up global user(s) for assignment |
 | `GET /v1/admin/users/{uid}` | view a user (limited fields) |
+| `GET /v1/admin/users/{uid}/profile` | full profile of a **member** of this tenant (§6.1) |
+| `PUT /v1/admin/users/{uid}/roles` `{roles[]}` | set their roles here to exactly this set (server diffs; admin guards apply) |
+| `DELETE /v1/admin/users/{uid}?scope=tenant\|system` | remove from the tenant, or delete the global account (§4) |
 | `POST /v1/admin/users` `{email, display_name, roles?[]}` | create new global user + invite |
 | `POST /v1/admin/users/{uid}/reinvite` | resend the invite |
 | `GET /v1/admin/email-templates` | list the tenant's two template kinds (custom or default) |
@@ -319,9 +351,11 @@ tokens) · `DATABASE_URL` (Postgres — per-tenant email templates, §5.1) ·
 
 ## 10. Out of scope (this iteration)
 
-Creating/deleting tenants (a global-admin function); deleting/disabling global
-users; MFA / external IdP / SSO; a full password-policy engine (basic length
-only); editing arbitrary user attributes.
+Creating/deleting tenants (a global-admin function); **disabling** (as opposed to
+deleting) a global user; deleting an account that another tenant still uses — a
+global-admin function, since no single tenant admin should decide it; reassigning
+or deleting a removed user's files; MFA / external IdP / SSO; a full
+password-policy engine (basic length only); editing arbitrary user attributes.
 
 ## 11. Assumptions to confirm
 
