@@ -241,12 +241,6 @@ class LdapClient:
                 out[u["uid"].lower()] = u
         return out
 
-    def delete_user(self, uid: str, dn: Optional[str] = None) -> None:
-        """Delete a global user entry. Callers are responsible for the guards
-        (§4): membership of other tenants, self-deletion, last administrator."""
-        with self._session(True) as c:
-            self._ok(c, c.delete(dn or self.user_dn(uid)))
-
     def create_user(self, uid: str, email: str, display_name: str) -> None:
         parts = (display_name or "").split()
         sn = parts[-1] if parts else uid

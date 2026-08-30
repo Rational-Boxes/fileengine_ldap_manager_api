@@ -59,7 +59,6 @@ class FakeLdap:
             },
             "other": {"viewers": ["shared@acme.test"]},
         }
-        self.deleted: list[str] = []
 
     # --- reads ---
     def get_user(self, uid):
@@ -99,11 +98,6 @@ class FakeLdap:
     def remove_member(self, tenant, role, uid):
         self.roles[tenant][role].remove(uid)
 
-    def delete_user(self, uid, dn=None):
-        self.deleted.append(uid)
-        self.users.pop(uid, None)
-
-
 class FakeAudit:
     def __init__(self, ok=True):
         self.ok = ok
@@ -119,14 +113,14 @@ class FakeStore:
 
     def __init__(self, enabled=True):
         self.enabled = enabled
-        self.purged: list[str] = []
+        self.purged: list = []
 
     def disable(self, uid):
         self.purged.append(uid)
 
-    def revoke_all(self, uid):
-        self.purged.append(uid)
-        return 1
+    def revoke_all_for_tenant(self, uid, tenant):
+        self.purged.append((uid, tenant))
+        return 2
 
 
 @pytest.fixture()
@@ -207,7 +201,7 @@ def test_profile_returns_full_fields_for_a_member(env):
     p = c.get("/v1/admin/users/ann@acme.test/profile").json()
     assert p["given_name"] == "Ann" and p["surname"] == "Adams"
     assert p["roles"] == ["editors"] and p["tenant"] == TENANT
-    assert p["other_tenant_count"] == 0 and p["can_delete_account"] is True
+    assert p["other_tenant_count"] == 0 and "can_delete_account" not in p
 
 
 def test_profile_counts_other_tenants_without_naming_them(env):
@@ -216,7 +210,6 @@ def test_profile_counts_other_tenants_without_naming_them(env):
     assert p["other_tenant_count"] == 1
     # The count travels; the name of the other tenant never leaves the service.
     assert "other" not in [str(v) for v in p.values()]
-    assert p["can_delete_account"] is False    # somebody else still needs it
 
 
 def test_profile_of_a_non_member_is_404_not_403(env):
@@ -228,9 +221,12 @@ def test_profile_of_a_non_member_is_404_not_403(env):
     assert r.status_code == 404   # "exists but not yours" would leak the directory
 
 
-def test_admin_cannot_delete_their_own_account(env):
+def test_profile_carries_no_account_deletion_affordance(env):
+    # Deleting the global account is a sysadmin/LDAP operation, so the tenant-admin
+    # profile exposes no such flag at all.
     c, _ = env
-    assert c.get(f"/v1/admin/users/{ADMIN}/profile").json()["can_delete_account"] is False
+    p = c.get(f"/v1/admin/users/{ADMIN}/profile").json()
+    assert "can_delete_account" not in p
 
 
 # --------------------------- editing memberships ---------------------------
@@ -301,38 +297,43 @@ def test_set_roles_with_no_change_is_a_no_op(env):
 
 # -------------------------------- removal ----------------------------------
 
-def test_tenant_removal_drops_every_role_but_keeps_the_account(env):
+def test_removal_drops_every_role_here_and_keeps_the_account(env):
     c, fake = env
-    r = c.request("DELETE", "/v1/admin/users/ann@acme.test", params={"scope": "tenant"})
+    r = c.delete("/v1/admin/users/ann@acme.test")
     assert r.status_code == 200
-    assert r.json() == {"uid": "ann@acme.test", "scope": "tenant",
-                        "roles_removed": ["editors"], "account_deleted": False}
+    assert r.json() == {"uid": "ann@acme.test", "roles_removed": ["editors"],
+                        "credentials_purged": 2}
     assert fake.ldap.user_roles(TENANT, "ann@acme.test") == []
     assert "ann@acme.test" in fake.ldap.users        # global account survives
 
 
-def test_tenant_removal_is_the_default_scope(env):
+def test_removal_purges_this_tenants_door_keys_only(env):
+    # Service credentials are tenant-bound, so removing a user from a tenant must
+    # revoke their keys FOR THAT TENANT — passed to the store with the tenant, so
+    # their keys elsewhere are untouched.
     c, fake = env
-    assert c.delete("/v1/admin/users/ann@acme.test").json()["account_deleted"] is False
-    assert "ann@acme.test" in fake.ldap.users
+    c.delete("/v1/admin/users/ann@acme.test")
+    assert fake.service_cred.purged == [("ann@acme.test", TENANT)]
+    # 2FA is per-user (shared across tenants), so a tenant removal never touches it.
+    assert fake.twofa.purged == []
 
 
-def test_system_removal_deletes_the_account_and_purges_its_secrets(env):
+def test_removal_does_not_delete_the_global_account(env):
+    # There is no account-deletion path in the tenant-admin API at all — that is a
+    # sysadmin/LDAP operation. Removing a user only unlinks them from this tenant.
     c, fake = env
-    r = c.request("DELETE", "/v1/admin/users/ann@acme.test", params={"scope": "system"})
-    assert r.status_code == 200 and r.json()["account_deleted"] is True
-    assert fake.ldap.deleted == ["ann@acme.test"]
-    assert fake.twofa.purged == ["ann@acme.test"]
-    assert fake.service_cred.purged == ["ann@acme.test"]
-    assert [e["action"] for e in fake.audit.events] == ["user_delete"]
+    c.delete("/v1/admin/users/shared@acme.test")
+    assert "shared@acme.test" in fake.ldap.users
+    # shared is also in tenant "other"; that membership is untouched.
+    assert "other" in fake.ldap.user_tenants("shared@acme.test")
 
 
-def test_system_removal_is_refused_while_another_tenant_uses_the_account(env):
+def test_removal_leaves_other_tenant_roles_untouched(env):
     c, fake = env
-    r = c.request("DELETE", "/v1/admin/users/shared@acme.test", params={"scope": "system"})
-    assert r.status_code == 409 and "other tenant" in r.json()["detail"]
-    assert fake.ldap.deleted == []
-    assert fake.ldap.user_roles(TENANT, "shared@acme.test") == ["editors"]  # nothing removed
+    before = fake.ldap.user_roles("other", "shared@acme.test")
+    c.delete("/v1/admin/users/shared@acme.test")
+    assert fake.ldap.user_roles(TENANT, "shared@acme.test") == []      # gone here
+    assert fake.ldap.user_roles("other", "shared@acme.test") == before  # kept there
 
 
 def test_removal_refuses_self_and_the_last_administrator(env):
@@ -355,22 +356,28 @@ def test_removal_is_refused_when_the_audit_log_is_down(env):
     r = c.delete("/v1/admin/users/ann@acme.test")
     assert r.status_code == 503
     assert fake.ldap.user_roles(TENANT, "ann@acme.test") == ["editors"]
+    assert fake.service_cred.purged == []   # nothing torn down when it is refused
 
 
-def test_system_removal_survives_a_failing_secret_purge(env):
-    # The directory entry is what actually revokes access; a store that is down
-    # must not leave the account half-deleted.
+def test_removal_survives_a_failing_credential_purge(env):
+    # The LDAP role removal is what revokes access; a credential store that is down
+    # must not make the removal fail (the leftover keys fail verification anyway
+    # once the roles are gone).
     c, fake = env
 
-    def boom(uid):
+    def boom(uid, tenant):
         raise RuntimeError("postgres is down")
 
-    fake.service_cred.revoke_all = boom
-    r = c.request("DELETE", "/v1/admin/users/ann@acme.test", params={"scope": "system"})
-    assert r.status_code == 200 and fake.ldap.deleted == ["ann@acme.test"]
+    fake.service_cred.revoke_all_for_tenant = boom
+    r = c.delete("/v1/admin/users/ann@acme.test")
+    assert r.status_code == 200
+    assert r.json()["credentials_purged"] == 0
+    assert fake.ldap.user_roles(TENANT, "ann@acme.test") == []
 
 
-def test_an_unknown_scope_is_rejected(env):
-    c, _ = env
-    assert c.request("DELETE", "/v1/admin/users/ann@acme.test",
-                     params={"scope": "everything"}).status_code == 422
+def test_removal_skips_credential_purge_when_the_store_is_disabled(env):
+    c, fake = env
+    fake.service_cred.enabled = False
+    r = c.delete("/v1/admin/users/ann@acme.test")
+    assert r.status_code == 200 and r.json()["credentials_purged"] == 0
+    assert fake.service_cred.purged == []

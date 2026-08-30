@@ -130,21 +130,27 @@ Scoped to their own `ou=<tenant>`:
   themselves** (no self-removal → prevents lockout), and the **last administrator
   cannot be removed** (last-admin guard). The `administrators` group itself cannot
   be deleted.
-- **Removing a user (decision) — two scopes.** Users are global, so "remove" is
-  ambiguous and the API makes the caller say which they mean:
-  - `scope=tenant` (default): drop every role they hold here. They lose all access
-    to this tenant; the global account survives for whatever other tenants use it.
-  - `scope=system`: the above, **and** delete the global account — permitted only
-    when **no other tenant holds a role on it** (otherwise `409`). Deleting the
-    account also purges its 2FA enrollment and every WebDAV/MCP service
-    credential, so nothing outlives the account it authenticated.
-  Both scopes are subject to the self-removal and last-administrator guards.
-  Files the user created are **not** touched: ownership is the core's record, not
-  the directory's, and a tenant admin deleting an account must not silently delete
-  the tenant's content with it.
-- **Not allowed:** renaming/disabling global user accounts, deleting an account
-  another tenant still uses, editing other tenants' `ou`s, creating/deleting
-  tenants, or changing user attributes beyond display name + role membership.
+- **Removing a user (decision) — from this tenant only.** A tenant admin removes a
+  user *from their own tenant*: `DELETE /v1/admin/users/{uid}` drops every role the
+  user holds here (so they lose all access to this tenant) and **purges their
+  tenant-bound door keys** — the WebDAV/MCP/BCF/CMIS `key:secret` service
+  credentials issued for this tenant, which must not outlive membership of it
+  (they are verified against a single tenant, so a key here is useless once the
+  roles are gone, and it is revoked rather than left dangling). Untouched: the
+  global account, the user's roles and keys in **other** tenants, their **per-user
+  2FA** enrollment (shared across tenants), and any files they authored (ownership
+  is the core's record, not the directory's). Subject to the self-removal and
+  last-administrator guards.
+- **Deleting the global account is NOT a tenant-admin operation.** The account
+  spans every tenant, so no single tenant's admin may delete it. It is a
+  **sysadmin operation performed directly in LDAP** (remove the `inetOrgPerson`
+  entry); this service exposes no endpoint for it. A tenant admin who wants a user
+  gone simply removes them from the tenant; when the last tenant does so the
+  account is a member of nothing, and its final teardown (the directory entry, and
+  any per-user 2FA) is the sysadmin's to do.
+- **Not allowed:** deleting/renaming/disabling global user accounts, editing other
+  tenants' `ou`s, creating/deleting tenants, or changing user attributes beyond
+  display name + role membership.
 
 ## 5. User notification emails (two kinds, per-tenant templates)
 
@@ -302,7 +308,7 @@ explain why an account cannot be deleted, without disclosing who else uses it.
 | `GET /v1/admin/users/{uid}` | view a user (limited fields) |
 | `GET /v1/admin/users/{uid}/profile` | full profile of a **member** of this tenant (§6.1) |
 | `PUT /v1/admin/users/{uid}/roles` `{roles[]}` | set their roles here to exactly this set (server diffs; admin guards apply) |
-| `DELETE /v1/admin/users/{uid}?scope=tenant\|system` | remove from the tenant, or delete the global account (§4) |
+| `DELETE /v1/admin/users/{uid}` | remove from THIS tenant: drop their roles here + purge this tenant's door keys (§4). No account-deletion scope — that is a sysadmin/LDAP operation |
 | `POST /v1/admin/users` `{email, display_name, roles[]}` | create new global user + invite (**≥1 existing role required**; empty → 422, unknown role → 400) |
 | `POST /v1/admin/users/{uid}/reinvite` | resend the invite |
 | `GET /v1/admin/email-templates` | list the tenant's two template kinds (custom or default) |
@@ -365,11 +371,12 @@ tokens) · `DATABASE_URL` (Postgres — per-tenant email templates, §5.1) ·
 
 ## 10. Out of scope (this iteration)
 
-Creating/deleting tenants (a global-admin function); **disabling** (as opposed to
-deleting) a global user; deleting an account that another tenant still uses — a
-global-admin function, since no single tenant admin should decide it; reassigning
-or deleting a removed user's files; MFA / external IdP / SSO; a full
-password-policy engine (basic length only); editing arbitrary user attributes.
+Creating/deleting tenants (a global-admin function); **deleting or disabling a
+global user account** — a sysadmin/LDAP operation, since the account spans every
+tenant and no single tenant admin should decide it (a tenant admin only removes a
+user *from their tenant*, §4); reassigning or deleting a removed user's files; MFA
+/ external IdP / SSO; a full password-policy engine (basic length only); editing
+arbitrary user attributes.
 
 ## 11. Assumptions to confirm
 

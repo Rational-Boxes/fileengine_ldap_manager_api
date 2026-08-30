@@ -209,11 +209,14 @@ class ServiceCredentialStore:
             conn.commit()
         return out_key, secret
 
-    def revoke_all(self, uid: str) -> int:
-        """Drop every credential a user holds — used when their account is deleted,
-        so no WebDAV/MCP key outlives the account it authenticates."""
+    def revoke_all_for_tenant(self, uid: str, tenant: str) -> int:
+        """Drop every credential a user holds IN ONE TENANT. Service credentials
+        (WebDAV/MCP/BCF/CMIS door keys) are tenant-bound — issued for, and verified
+        against, a single tenant — so losing membership of a tenant must take its
+        keys with it, while the same user's keys in other tenants are untouched."""
         with self._connect() as conn, conn.cursor() as cur:
-            cur.execute("DELETE FROM service_credential WHERE uid=%s", (uid,))
+            cur.execute("DELETE FROM service_credential WHERE uid=%s AND tenant=%s",
+                        (uid, tenant))
             deleted = cur.rowcount
             conn.commit()
         return int(deleted or 0)

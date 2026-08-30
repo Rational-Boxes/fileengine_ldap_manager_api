@@ -79,8 +79,8 @@ class RosterUserOut(BaseModel):
 class AdminUserDetail(BaseModel):
     """A tenant member's profile as an admin sees it. ``other_tenant_count`` is a
     count, never the names: which *other* tenants a user belongs to is not this
-    tenant admin's business, but the number is what makes the delete guard
-    explicable ("belongs to 2 other tenants")."""
+    tenant admin's business, but the number tells them that removing the person
+    from this workspace still leaves them with access elsewhere."""
     uid: str
     email: str
     display_name: str = ""
@@ -91,7 +91,6 @@ class AdminUserDetail(BaseModel):
     roles: list[str] = Field(default_factory=list)
     is_admin: bool = False
     other_tenant_count: int = 0
-    can_delete_account: bool = False
 
 
 class UserRolesUpdate(BaseModel):
@@ -101,10 +100,12 @@ class UserRolesUpdate(BaseModel):
 
 
 class UserRemoveOut(BaseModel):
+    """Result of removing a user from a tenant. There is only one kind of removal a
+    tenant admin can do — from their own tenant; deleting the global account is a
+    sysadmin/LDAP operation and has no endpoint here."""
     uid: str
-    scope: str                      # "tenant" | "system"
     roles_removed: list[str] = Field(default_factory=list)
-    account_deleted: bool = False
+    credentials_purged: int = 0     # tenant-bound door keys (WebDAV/MCP/…) revoked
 
 
 # --- self-service profile (/v1/me) ---

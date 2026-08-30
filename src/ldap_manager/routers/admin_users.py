@@ -172,10 +172,12 @@ def _detail(svc: Services, ident: Identity, user: dict, roles: list[str]) -> Adm
         display_name=user.get("display_name", ""), given_name=user.get("given_name", ""),
         surname=user.get("surname", ""), avatar_url=user.get("avatar_url", ""),
         tenant=ident.tenant, roles=roles, is_admin=ADMINS in roles,
+        # Informative only — how many OTHER tenants also hold this account, as a
+        # count and never as names (§6.1). A tenant admin cannot act on the global
+        # account regardless (deletion is a sysadmin/LDAP operation); this tells
+        # them their "remove from this workspace" leaves the person with access
+        # elsewhere.
         other_tenant_count=len(others),
-        # Deleting a *global* account is only this tenant's call when no other
-        # tenant is relying on it (§4).
-        can_delete_account=not others and user["uid"] != ident.user,
     )
 
 
@@ -233,16 +235,22 @@ def set_user_roles(uid: str, body: UserRolesUpdate, svc: Services = Depends(serv
 
 
 @router.delete("/{uid}", response_model=UserRemoveOut)
-def remove_user(uid: str, scope: str = Query("tenant", pattern="^(tenant|system)$"),
-                svc: Services = Depends(services),
+def remove_user(uid: str, svc: Services = Depends(services),
                 ident: Identity = Depends(require_tenant_admin)):
-    """Remove a user, at one of two scopes.
+    """Remove a user from THIS tenant: drop every role they hold here, and purge
+    the door keys that let them reach it.
 
-    ``tenant`` (the default) drops every role they hold here: they lose all access
-    to this tenant, and the global account — which may serve other tenants —
-    survives. ``system`` also deletes the account itself, and is refused while any
-    other tenant still has a role on it. Files the user created stay where they
-    are; ownership is the core's record, not the directory's.
+    A tenant admin's authority is bounded by their tenant. This drops the user's
+    roles here — so they lose all access to this tenant — and purges their
+    tenant-bound service credentials (WebDAV/MCP/BCF/CMIS keys are issued for a
+    single tenant, so a key for this tenant must not outlive membership of it).
+    The global account, their roles in any OTHER tenant, their keys there, and
+    their per-user 2FA enrollment are all untouched, and files they authored stay
+    where they are (ownership is the core's record, not the directory's).
+
+    Deleting the global account itself is deliberately NOT here: it spans every
+    tenant, so it is a sysadmin operation performed directly in LDAP, not
+    something one tenant's admin can do.
     """
     user = svc.ldap.get_user(uid)
     if not user:
@@ -255,39 +263,26 @@ def remove_user(uid: str, scope: str = Query("tenant", pattern="^(tenant|system)
         raise HTTPException(status_code=404, detail="user is not a member of this tenant")
     if ADMINS in roles:
         _guard_admin_removal(svc, ident, target)
-    delete_account = scope == "system"
-    if delete_account:
-        others = [t for t in svc.ldap.user_tenants(target) if t != ident.tenant]
-        if others:
-            raise HTTPException(
-                status_code=409,
-                detail=(f"this account is also used by {len(others)} other tenant(s); "
-                        "remove them from this tenant instead"))
-    action = "user_delete" if delete_account else "user_remove_tenant"
-    if not svc.audit.emit(category="user", action=action, outcome="ok", actor=ident.user,
-                          tenant=ident.tenant, target_uid=target, target_type="principal",
-                          detail={"roles": roles, "scope": scope}):
+    if not svc.audit.emit(category="user", action="user_remove_tenant", outcome="ok",
+                          actor=ident.user, tenant=ident.tenant, target_uid=target,
+                          target_type="principal", detail={"roles": roles}):
         raise HTTPException(status_code=503, detail="audit log unavailable")
     for role in roles:
         svc.ldap.remove_member(ident.tenant, role, target)
-    if delete_account:
-        _purge_account_secrets(svc, target)
-        svc.ldap.delete_user(target, user.get("dn"))
-    return UserRemoveOut(uid=target, scope=scope, roles_removed=roles,
-                         account_deleted=delete_account)
+    purged = _purge_tenant_credentials(svc, ident.tenant, target)
+    return UserRemoveOut(uid=target, roles_removed=roles, credentials_purged=purged)
 
 
-def _purge_account_secrets(svc: Services, uid: str) -> None:
-    """Best-effort teardown of everything keyed to a deleted account. Each store
-    is optional (no DATABASE_URL → disabled), and a failure here must not leave a
-    half-deleted user: the directory entry is what actually revokes access, so it
-    is deleted either way and the leftovers are logged for cleanup."""
-    for name, store, purge in (("2fa", svc.twofa, lambda: svc.twofa.disable(uid)),
-                               ("service credentials", svc.service_cred,
-                                lambda: svc.service_cred.revoke_all(uid))):
-        if not store.enabled:
-            continue
-        try:
-            purge()
-        except Exception as e:
-            log.warning("could not purge %s for deleted user %s: %s", name, uid, e)
+def _purge_tenant_credentials(svc: Services, tenant: str, uid: str) -> int:
+    """Revoke the user's tenant-bound service credentials for THIS tenant only.
+    Best-effort: the LDAP role removal above is what actually revokes access, so a
+    credential-store hiccup must not leave the user a member; the leftover keys are
+    logged for cleanup and would in any case fail verification once the roles are
+    gone. 2FA is per-user (shared across tenants), so it is NOT touched here."""
+    if not svc.service_cred.enabled:
+        return 0
+    try:
+        return svc.service_cred.revoke_all_for_tenant(uid, tenant)
+    except Exception as e:
+        log.warning("could not purge %s's service credentials in %s: %s", uid, tenant, e)
+        return 0
