@@ -221,7 +221,25 @@ class LdapClient:
             display_name=val("displayName") or val("cn"),
             given_name=val("givenName"), surname=val("sn"),
             avatar_url=val(self.s.ldap_avatar_attr),
+            # The entry's real DN — a directory entry created outside this service
+            # may not use uid= as its RDN, so deletes go by what LDAP reports
+            # rather than by a DN we reconstruct.
+            dn=str(entry.entry_dn),
         )
+
+    def _fetch_users(self, conn, uids: list[str], chunk: int = 40) -> dict[str, LdapUser]:
+        """Resolve many uids in one open session, batched into OR-filters. The
+        roster would otherwise open a fresh connection per member."""
+        attrs = ["uid", "mail", "cn", "displayName", "givenName", "sn", self.s.ldap_avatar_attr]
+        out: dict[str, LdapUser] = {}
+        for i in range(0, len(uids), chunk):
+            clauses = "".join(f"(uid={escape_filter_chars(u)})" for u in uids[i:i + chunk])
+            conn.search(self.s.ldap_user_base, f"(&(objectClass=inetOrgPerson)(|{clauses}))",
+                        search_scope=SUBTREE, attributes=attrs)
+            for e in conn.entries:
+                u = self._to_user(e)
+                out[u["uid"].lower()] = u
+        return out
 
     def create_user(self, uid: str, email: str, display_name: str) -> None:
         parts = (display_name or "").split()
@@ -296,6 +314,58 @@ class LdapClient:
             self._ok(c, c.modify(self.role_dn(tenant, role),
                                  {"member": [(MODIFY_DELETE, [self.user_dn(uid)])]}))
 
+    def list_tenant_users(self, tenant: str) -> list[LdapUser]:
+        """Every user holding at least one role in this tenant, each carrying the
+        roles they hold here. This is the tenant's own membership, not the global
+        directory §6 refuses to enumerate — a tenant admin already learns exactly
+        this by walking their roles one at a time.
+
+        A member DN with no matching entry (a user deleted out from under the
+        group) is kept as a uid-only stub so it stays visible and removable
+        instead of silently vanishing from the roster.
+        """
+        with self._session(False) as c:
+            c.search(self.tenant_dn(tenant), "(objectClass=groupOfNames)",
+                     search_scope=LEVEL, attributes=["cn", "member"])
+            roles_by_uid: dict[str, list[str]] = {}
+            for e in c.entries:
+                role = str(e["cn"].value)
+                members = list(e["member"].values) if "member" in e else []
+                for m in members:
+                    if self._is_placeholder(m):
+                        continue
+                    roles_by_uid.setdefault(_uid_from_dn(m), []).append(role)
+            entries = self._fetch_users(c, list(roles_by_uid))
+        out = []
+        for uid, roles in roles_by_uid.items():
+            u = LdapUser(entries.get(uid.lower()) or LdapUser(uid=uid, email=uid, display_name="",
+                                                             given_name="", surname="",
+                                                             avatar_url="", dn=""))
+            u["roles"] = sorted(roles)
+            u["orphaned"] = not u.get("dn")
+            out.append(u)
+        return sorted(out, key=lambda u: ((u.get("display_name") or u["uid"]).lower(), u["uid"]))
+
+    def user_roles(self, tenant: str, uid: str) -> list[str]:
+        """The roles this user holds in one tenant."""
+        user_dn = escape_filter_chars(self.user_dn(uid))
+        with self._session(False) as c:
+            c.search(self.tenant_dn(tenant),
+                     f"(&(objectClass=groupOfNames)(member={user_dn}))",
+                     search_scope=LEVEL, attributes=["cn"])
+            return sorted(str(e["cn"].value) for e in c.entries)
+
+    def user_tenants(self, uid: str) -> list[str]:
+        """Every tenant ou in which this user holds a role. Users are global, so
+        this is what tells a tenant admin whether deleting the account would take
+        it away from somebody else."""
+        user_dn = escape_filter_chars(self.user_dn(uid))
+        with self._session(False) as c:
+            c.search(self.s.ldap_tenant_base,
+                     f"(&(objectClass=groupOfNames)(member={user_dn}))",
+                     search_scope=SUBTREE, attributes=[])
+            return sorted({t for t in (_tenant_from_role_dn(str(e.entry_dn)) for e in c.entries) if t})
+
     def _is_placeholder(self, dn: str) -> bool:
         return _dn_eq(dn, self.s.ldap_bind_dn)
 
@@ -311,11 +381,60 @@ def _escape_dn(v: str) -> str:
     return "".join(out)
 
 
+def _split_dn(dn: str) -> list[str]:
+    """Split a DN on its *unescaped* commas, so ``uid=a\\,b,ou=...`` stays one RDN."""
+    parts: list[str] = []
+    cur: list[str] = []
+    esc = False
+    for ch in dn or "":
+        if esc:
+            cur.append(ch)
+            esc = False
+        elif ch == "\\":
+            cur.append(ch)
+            esc = True
+        elif ch == ",":
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _unescape_dn(v: str) -> str:
+    out: list[str] = []
+    esc = False
+    for ch in v or "":
+        if esc:
+            out.append(ch)
+            esc = False
+        elif ch == "\\":
+            esc = True
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _uid_from_dn(dn: str) -> str:
-    rdn = (dn or "").split(",", 1)[0]
+    parts = _split_dn(dn)
+    if not parts:
+        return dn
+    rdn = parts[0]
     if "=" in rdn:
-        return rdn.split("=", 1)[1]
+        # Unescape: the value round-trips straight back into user_dn(), which
+        # re-escapes it.
+        return _unescape_dn(rdn.split("=", 1)[1])
     return dn
+
+
+def _tenant_from_role_dn(dn: str) -> str:
+    """``cn=<role>,ou=<tenant>,<tenant_base>`` -> ``<tenant>``."""
+    for rdn in _split_dn(dn)[1:]:
+        key, _, value = rdn.partition("=")
+        if key.strip().lower() == "ou":
+            return _unescape_dn(value.strip())
+    return ""
 
 
 def _dn_eq(a: str, b: str) -> bool:

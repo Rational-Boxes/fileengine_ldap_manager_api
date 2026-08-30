@@ -109,15 +109,48 @@ the defaults; a deployment overrides them via `FILEENGINE_LDAP_DOMAIN`,
 
 Scoped to their own `ou=<tenant>`:
 - **Roles:** list / create / delete role groups; add/remove members.
-- **Users:** look up global users (exact match, §6), create new global users (via
-  the invite flow, §5), and assign/unassign users to this tenant's roles.
+- **Users:** list the tenant's own roster (§6.1), look up global users (exact
+  match, §6), create new global users (via the invite flow, §5, **with at least
+  one role** — see below), view a member's profile, and assign/unassign users to
+  this tenant's roles.
+- **Membership is holding ≥1 role (decision).** A tenant has no membership record
+  separate from its role groups: a user is a member of a tenant iff they hold at
+  least one of its roles (the same rule the bridges enforce via
+  `getTenantsForUser`). Two consequences the API makes concrete:
+  - **Creating a user requires ≥1 role.** `POST /v1/admin/users` with an empty
+    `roles` is refused (422). A role-less account would be a member of nothing
+    here — absent from the roster and unable to reach the tenant — so there is no
+    role-less member to create. Every named role must also already exist (400
+    otherwise), checked before anything is written.
+  - **Removing the last role removes the user from the tenant.** The roles editor
+    (`PUT …/roles`) will not reduce a member to zero roles; emptying membership is
+    a removal and goes through `DELETE …/{uid}?scope=tenant` (§4), which is the
+    same operation with its own confirmation.
 - **`administrators` group (decision):** may add/remove members **except
   themselves** (no self-removal → prevents lockout), and the **last administrator
   cannot be removed** (last-admin guard). The `administrators` group itself cannot
   be deleted.
-- **Not allowed:** deleting/renaming/disabling global user accounts (they may
-  belong to other tenants), editing other tenants' `ou`s, creating/deleting
-  tenants, or changing user attributes beyond display name + role membership.
+- **Removing a user (decision) — from this tenant only.** A tenant admin removes a
+  user *from their own tenant*: `DELETE /v1/admin/users/{uid}` drops every role the
+  user holds here (so they lose all access to this tenant) and **purges their
+  tenant-bound door keys** — the WebDAV/MCP/BCF/CMIS `key:secret` service
+  credentials issued for this tenant, which must not outlive membership of it
+  (they are verified against a single tenant, so a key here is useless once the
+  roles are gone, and it is revoked rather than left dangling). Untouched: the
+  global account, the user's roles and keys in **other** tenants, their **per-user
+  2FA** enrollment (shared across tenants), and any files they authored (ownership
+  is the core's record, not the directory's). Subject to the self-removal and
+  last-administrator guards.
+- **Deleting the global account is NOT a tenant-admin operation.** The account
+  spans every tenant, so no single tenant's admin may delete it. It is a
+  **sysadmin operation performed directly in LDAP** (remove the `inetOrgPerson`
+  entry); this service exposes no endpoint for it. A tenant admin who wants a user
+  gone simply removes them from the tenant; when the last tenant does so the
+  account is a member of nothing, and its final teardown (the directory entry, and
+  any per-user 2FA) is the sysadmin's to do.
+- **Not allowed:** deleting/renaming/disabling global user accounts, editing other
+  tenants' `ou`s, creating/deleting tenants, or changing user attributes beyond
+  display name + role membership.
 
 ## 5. User notification emails (two kinds, per-tenant templates)
 
@@ -245,6 +278,43 @@ across tenants. Lookup is therefore **exact email/uid** (or a **≥3-char prefix
 returns limited fields (`uid`, display name, whether already in this tenant), and
 is capped + rate-limited. No full enumeration.
 
+### 6.1 The tenant roster (not an exception to the above)
+
+`GET /v1/admin/users/roster` returns every user holding a role in the **caller's
+own tenant**, with the roles they hold there. That is not directory enumeration:
+a tenant admin already learns exactly this list by walking their roles one at a
+time, so serving it in one call adds no information — it only stops the UI from
+making N requests to rebuild it. Nothing outside the caller's `ou` is reachable
+through it.
+
+The full profile (`GET /v1/admin/users/{uid}/profile`) is likewise limited to the
+tenant's **own members**; a global user who holds no role here answers `404`, not
+`403`, because "exists, but not yours" is itself a directory leak. Membership of
+*other* tenants is reported as a **count only**, never as names — enough to
+explain why an account cannot be deleted, without disclosing who else uses it.
+
+### 6.2 Invite must not reveal prior account existence
+
+Whether an email already has a platform account is another person's personal
+information, so the **invite endpoint is single-flow and its response is identical
+whether or not the account exists.** One `POST /v1/admin/users`:
+
+- **No account yet:** create a pending account (no password), assign the roles,
+  provision a home folder, email a **set-password invite**.
+- **Account exists (anywhere on the platform):** assign the roles they do not
+  already hold, email an **informational** "you've been added" notice — never a
+  password operation on an account that already has one.
+
+The response is built only from what the admin submitted (the email, and
+`in_this_tenant: true` — always, since a role is always granted); it never echoes
+the existing account's stored name, and the status/message/shape do not differ by
+case. The old `409 "user already exists"` was itself a directory-enumeration
+oracle and is gone. Both email paths must be able to send, or a
+configuration-dependent difference (one path erroring while the other succeeds)
+would reintroduce the leak. This retires the separate "search the directory and
+add an existing user" flow, which required the admin to first *learn* that the
+account existed — the very disclosure this avoids.
+
 ## 7. API surface (v1, JSON; every route scoped to the caller's tenant)
 
 | Method & path | Purpose |
@@ -255,9 +325,13 @@ is capped + rate-limited. No full enumeration.
 | `GET /v1/admin/roles/{role}/members` | list members |
 | `POST /v1/admin/roles/{role}/members` `{uid}` | add an existing user to the role (may trigger the `access_granted` email, §5-B) |
 | `DELETE /v1/admin/roles/{role}/members/{uid}` | remove (admins: not self / not last) |
+| `GET /v1/admin/users/roster` | the tenant's full user roster, each with the roles they hold here (§6.1) |
 | `GET /v1/admin/users?query=<exact/prefix>` | look up global user(s) for assignment |
 | `GET /v1/admin/users/{uid}` | view a user (limited fields) |
-| `POST /v1/admin/users` `{email, display_name, roles?[]}` | create new global user + invite |
+| `GET /v1/admin/users/{uid}/profile` | full profile of a **member** of this tenant (§6.1) |
+| `PUT /v1/admin/users/{uid}/roles` `{roles[]}` | set their roles here to exactly this set (server diffs; admin guards apply) |
+| `DELETE /v1/admin/users/{uid}` | remove from THIS tenant: drop their roles here + purge this tenant's door keys (§4). No account-deletion scope — that is a sysadmin/LDAP operation |
+| `POST /v1/admin/users` `{email, display_name, roles[]}` | invite into this tenant (**≥1 existing role required**; empty → 422, unknown role → 400). New account → create + set-password invite; existing account → add to roles + informational notice. **Response is identical either way** — never reveals whether the account already existed (§6.2) |
 | `POST /v1/admin/users/{uid}/reinvite` | resend the invite |
 | `GET /v1/admin/email-templates` | list the tenant's two template kinds (custom or default) |
 | `GET /v1/admin/email-templates/{kind}` | get one (`new_user` / `access_granted`) |
@@ -319,9 +393,12 @@ tokens) · `DATABASE_URL` (Postgres — per-tenant email templates, §5.1) ·
 
 ## 10. Out of scope (this iteration)
 
-Creating/deleting tenants (a global-admin function); deleting/disabling global
-users; MFA / external IdP / SSO; a full password-policy engine (basic length
-only); editing arbitrary user attributes.
+Creating/deleting tenants (a global-admin function); **deleting or disabling a
+global user account** — a sysadmin/LDAP operation, since the account spans every
+tenant and no single tenant admin should decide it (a tenant admin only removes a
+user *from their tenant*, §4); reassigning or deleting a removed user's files; MFA
+/ external IdP / SSO; a full password-policy engine (basic length only); editing
+arbitrary user attributes.
 
 ## 11. Assumptions to confirm
 

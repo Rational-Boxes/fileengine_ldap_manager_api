@@ -156,6 +156,9 @@ def test_remove_member_emits_role_remove_user():
 def test_create_user_emits_user_create():
     ldap = MagicMock()
     ldap.get_user.return_value = None  # does not already exist
+    # create_user now validates every requested role exists in the tenant before
+    # writing anything, so the fake directory must know the role.
+    ldap.list_roles.return_value = [{"name": "editors", "dn": "cn=editors", "member_count": 0}]
     fake = _FakePub()
     # The invite machinery may 503 (unconfigured), but the fail-closed write-ahead
     # user_create fires first — that's what Phase 4 adds.
