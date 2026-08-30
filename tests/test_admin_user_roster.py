@@ -22,6 +22,8 @@ the global-account check) rather than LDAP itself.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -51,6 +53,7 @@ class FakeLdap:
                                  "surname": "Shared", "avatar_url": "",
                                  "dn": "uid=shared@acme.test,ou=people"},
         }
+        self.created: list = []
         self.roles = {
             TENANT: {
                 "administrators": [ADMIN],
@@ -92,8 +95,17 @@ class FakeLdap:
         return sorted(out, key=lambda u: (u.get("display_name") or u["uid"]).lower())
 
     # --- writes ---
+    def is_tenant_member(self, uid, tenant):
+        return any(uid in m for m in self.roles.get(tenant, {}).values())
+
+    def create_user(self, uid, email, display_name):
+        self.users[uid] = {"uid": uid, "email": email, "display_name": display_name,
+                           "given_name": "", "surname": "", "avatar_url": "",
+                           "dn": f"uid={uid},ou=people"}
+        self.created.append(uid)
+
     def add_member(self, tenant, role, uid):
-        self.roles[tenant][role].append(uid)
+        self.roles.setdefault(tenant, {}).setdefault(role, []).append(uid)
 
     def remove_member(self, tenant, role, uid):
         self.roles[tenant][role].remove(uid)
@@ -123,6 +135,15 @@ class FakeStore:
         return 2
 
 
+class FakeMailer:
+    def __init__(self, enabled=True):
+        self.enabled = enabled
+        self.sent: list = []
+
+    def send(self, to, subject, body):
+        self.sent.append((to, subject, body))
+
+
 @pytest.fixture()
 def env():
     app = create_app(Settings())
@@ -131,6 +152,16 @@ def env():
     fake.audit = FakeAudit()
     fake.twofa = FakeStore()
     fake.service_cred = FakeStore()
+    # Both invite emails must be able to send, so the new-account and existing-
+    # account paths behave identically (the privacy invariant). Without this the
+    # new path 503s on unconfigured email while the existing path 201s — itself a
+    # leak of which case ran.
+    fake.mailer = FakeMailer()
+    fake.tokens = SimpleNamespace(enabled=True, issue=lambda kind, uid, ttl: "tok-123")
+    fake.templates = SimpleNamespace(
+        get=lambda tenant, kind: SimpleNamespace(subject="Hello {{email}}",
+                                                 body="link {{invite_link}}"))
+    fake.settings.invite_link_base = "https://app.example/invite"
     app.dependency_overrides[services] = lambda: fake
     app.dependency_overrides[require_tenant_admin] = lambda: Identity(
         user=ADMIN, tenant=TENANT, roles=["administrators"])
@@ -174,6 +205,88 @@ def test_invite_rejects_an_unknown_role_before_creating_anything(env):
     assert r.status_code == 400 and "wizards" in r.json()["detail"]
     assert fake.audit.events == []
     assert "new@acme.com" not in fake.ldap.users
+
+
+def test_invite_creates_and_invites_a_brand_new_user(env):
+    c, fake = env
+    hdr = {"Authorization": "Bearer x"}
+    r = c.post("/v1/admin/users",
+               json={"email": "new@acme.com", "display_name": "New Person", "roles": ["editors"]},
+               headers=hdr)
+    assert r.status_code == 201
+    assert "new@acme.com" in fake.ldap.created                 # account made
+    assert "new@acme.com" in fake.ldap.roles[TENANT]["editors"]
+    assert [e["action"] for e in fake.audit.events] == ["user_create"]
+
+
+def test_invite_adds_an_existing_account_without_recreating_it(env):
+    # An account that already exists (in tenant "other"); inviting them into acme
+    # must ADD them, not create — and must not send a set-password operation.
+    c, fake = env
+    fake.ldap.users["existing@acme.com"] = {"uid": "existing@acme.com", "email": "existing@acme.com",
+                                           "display_name": "Existing", "dn": "uid=existing"}
+    fake.ldap.roles["other"] = {"viewers": ["existing@acme.com"]}
+    r = c.post("/v1/admin/users",
+               json={"email": "existing@acme.com", "display_name": "ignored", "roles": ["viewers"]},
+               headers={"Authorization": "Bearer x"})
+    assert r.status_code == 201
+    assert fake.ldap.created == []                             # NOT recreated
+    assert "existing@acme.com" in fake.ldap.roles[TENANT]["viewers"]
+    assert [e["action"] for e in fake.audit.events] == ["user_add_existing"]
+    assert fake.mailer.sent                                    # informational email sent
+
+
+def test_invite_response_is_identical_whether_or_not_the_account_exists(env):
+    # The privacy invariant: a tenant admin must not be able to tell, from the
+    # response, whether the email already had a platform account — that is someone
+    # else's personal information. Same body -> byte-identical status and JSON.
+    c, fake = env
+    body = {"email": "probe@acme.com", "display_name": "Probe", "roles": ["editors"]}
+    hdr = {"Authorization": "Bearer x"}
+
+    # (a) account does NOT exist
+    r_new = c.post("/v1/admin/users", json=body, headers=hdr)
+
+    # (b) same request, but now the account DOES exist (in another tenant)
+    fake.ldap.users["probe@acme.com"] = {"uid": "probe@acme.com", "email": "probe@acme.com",
+                                         "display_name": "Their Real Name", "dn": "uid=probe"}
+    fake.ldap.roles["other"] = {"viewers": ["probe@acme.com"]}
+    r_exists = c.post("/v1/admin/users", json=body, headers=hdr)
+
+    assert r_new.status_code == r_exists.status_code
+    assert r_new.json() == r_exists.json()
+    # And the existing account's real name never appears in the response.
+    assert "Their Real Name" not in r_exists.text
+
+
+def test_invite_never_echoes_an_existing_users_stored_details(env):
+    c, fake = env
+    fake.ldap.users["known@acme.com"] = {"uid": "known@acme.com", "email": "known@acme.com",
+                                        "display_name": "Confidential Name", "dn": "uid=known"}
+    r = c.post("/v1/admin/users",
+               json={"email": "known@acme.com", "display_name": "What Admin Typed", "roles": ["editors"]},
+               headers={"Authorization": "Bearer x"})
+    body = r.json()
+    assert body["display_name"] == "What Admin Typed"          # submitted, not stored
+    assert body["in_this_tenant"] is True
+    assert "Confidential Name" not in r.text
+
+
+def test_invite_of_an_existing_member_only_adds_missing_roles(env):
+    # A user already an 'editors' member of acme. Inviting with {editors, viewers}
+    # adds only viewers; no duplicate add of editors.
+    c, fake = env
+    fake.ldap.users["mem@acme.com"] = {"uid": "mem@acme.com", "email": "mem@acme.com",
+                                      "display_name": "Mem", "dn": "uid=mem"}
+    fake.ldap.roles[TENANT]["editors"].append("mem@acme.com")
+    before = list(fake.ldap.roles[TENANT]["editors"])
+    r = c.post("/v1/admin/users",
+               json={"email": "mem@acme.com", "display_name": "Mem", "roles": ["editors", "viewers"]},
+               headers={"Authorization": "Bearer x"})
+    assert r.status_code == 201
+    assert fake.ldap.roles[TENANT]["editors"] == before        # editors unchanged (no dup)
+    assert "mem@acme.com" in fake.ldap.roles[TENANT]["viewers"]
+    assert fake.ldap.created == []
 
 
 # ------------------------------- the roster --------------------------------

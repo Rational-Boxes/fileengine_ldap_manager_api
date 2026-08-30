@@ -293,6 +293,28 @@ tenant's **own members**; a global user who holds no role here answers `404`, no
 *other* tenants is reported as a **count only**, never as names — enough to
 explain why an account cannot be deleted, without disclosing who else uses it.
 
+### 6.2 Invite must not reveal prior account existence
+
+Whether an email already has a platform account is another person's personal
+information, so the **invite endpoint is single-flow and its response is identical
+whether or not the account exists.** One `POST /v1/admin/users`:
+
+- **No account yet:** create a pending account (no password), assign the roles,
+  provision a home folder, email a **set-password invite**.
+- **Account exists (anywhere on the platform):** assign the roles they do not
+  already hold, email an **informational** "you've been added" notice — never a
+  password operation on an account that already has one.
+
+The response is built only from what the admin submitted (the email, and
+`in_this_tenant: true` — always, since a role is always granted); it never echoes
+the existing account's stored name, and the status/message/shape do not differ by
+case. The old `409 "user already exists"` was itself a directory-enumeration
+oracle and is gone. Both email paths must be able to send, or a
+configuration-dependent difference (one path erroring while the other succeeds)
+would reintroduce the leak. This retires the separate "search the directory and
+add an existing user" flow, which required the admin to first *learn* that the
+account existed — the very disclosure this avoids.
+
 ## 7. API surface (v1, JSON; every route scoped to the caller's tenant)
 
 | Method & path | Purpose |
@@ -309,7 +331,7 @@ explain why an account cannot be deleted, without disclosing who else uses it.
 | `GET /v1/admin/users/{uid}/profile` | full profile of a **member** of this tenant (§6.1) |
 | `PUT /v1/admin/users/{uid}/roles` `{roles[]}` | set their roles here to exactly this set (server diffs; admin guards apply) |
 | `DELETE /v1/admin/users/{uid}` | remove from THIS tenant: drop their roles here + purge this tenant's door keys (§4). No account-deletion scope — that is a sysadmin/LDAP operation |
-| `POST /v1/admin/users` `{email, display_name, roles[]}` | create new global user + invite (**≥1 existing role required**; empty → 422, unknown role → 400) |
+| `POST /v1/admin/users` `{email, display_name, roles[]}` | invite into this tenant (**≥1 existing role required**; empty → 422, unknown role → 400). New account → create + set-password invite; existing account → add to roles + informational notice. **Response is identical either way** — never reveals whether the account already existed (§6.2) |
 | `POST /v1/admin/users/{uid}/reinvite` | resend the invite |
 | `GET /v1/admin/email-templates` | list the tenant's two template kinds (custom or default) |
 | `GET /v1/admin/email-templates/{kind}` | get one (`new_user` / `access_granted`) |

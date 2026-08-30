@@ -79,39 +79,88 @@ def get_user(uid: str, svc: Services = Depends(services), ident: Identity = Depe
 def create_user(body: UserCreate, svc: Services = Depends(services),
                 ident: Identity = Depends(require_tenant_admin),
                 token: str = Depends(bearer_token)):
-    """Create a new global user (pending, no password) + assign roles + provision a
-    private home folder + send the invite. If the user already exists this is a 409
-    — use role assignment instead."""
+    """Invite a user into this tenant, whether or not they already have an account.
+
+    One flow, because a tenant admin should not have to know which case they are
+    in — and, more importantly, MUST NOT be told. Whether an email already has a
+    platform account is another person's personal information; a response that
+    differed by case (the old 409 "user already exists", a "created" flag, a
+    different status or message) would leak the whole directory one probe at a time.
+    So the two internal paths are indistinguishable from the outside:
+
+    - **No account yet:** create a pending account (no password), assign the roles,
+      provision a private home folder, and email a **set-password invite**.
+    - **Account exists:** assign the roles they do not already hold and email an
+      **informational** "you've been added" notice — never a password operation on
+      an account that already has one.
+
+    Both return the SAME shape, built only from what the admin submitted — never
+    from the existing account's stored details — so nothing about the account's
+    prior existence, name, or membership escapes.
+    """
     email = str(body.email)
-    if svc.ldap.get_user(email):
-        raise HTTPException(status_code=409, detail="user already exists; assign them to a role instead")
-    # A member holds >=1 role (the schema already requires the list be non-empty);
-    # every named role must also EXIST in this tenant. Checked before anything is
-    # written, because a bogus role would otherwise make add_member fail partway
-    # and leave a created account that is a member of nothing — the very ghost the
-    # >=1-role rule exists to prevent.
+    # Every named role must exist in this tenant. Checked before any write, because
+    # a bogus role would otherwise leave a half-added principal (see §4).
     known = {r["name"] for r in svc.ldap.list_roles(ident.tenant)}
     unknown = sorted(set(body.roles) - known)
     if unknown:
         raise HTTPException(status_code=400, detail=f"unknown role(s): {', '.join(unknown)}")
-    # Fail-closed write-ahead (§6): record the user creation (+ its role grants)
-    # before the directory is mutated.
+
+    existing = svc.ldap.get_user(email)
+    if existing:
+        _add_existing_to_tenant(svc, ident, existing["uid"], body.roles, token)
+    else:
+        _invite_new_user(svc, ident, email, body.display_name, body.roles, token)
+
+    # Uniform, non-revealing result: echo only the submitted email + the fact that
+    # they are now a member (always true — we always assign >=1 role). No display
+    # name from the directory, no created/added flag, no status difference.
+    return UserOut(uid=email, email=email, display_name=body.display_name, in_this_tenant=True)
+
+
+def _invite_new_user(svc: Services, ident: Identity, email: str, display_name: str,
+                     roles: list[str], token: str) -> None:
+    # Fail-closed write-ahead (§6): record the creation (+ its grants) before the
+    # directory is mutated.
     if not svc.audit.emit(category="user", action="user_create", outcome="ok",
                           actor=ident.user, tenant=ident.tenant, target_uid=email,
-                          target_type="principal", detail={"roles": list(body.roles)}):
+                          target_type="principal", detail={"roles": list(roles)}):
         raise HTTPException(status_code=503, detail="audit log unavailable")
-    svc.ldap.create_user(email, email, body.display_name)
-    for role in body.roles:
+    svc.ldap.create_user(email, email, display_name)
+    for role in roles:
         svc.ldap.add_member(ident.tenant, role, email)
-    # Private home folder under Users/<uid> (full access to the user, denied to
-    # everyone else). Best-effort under the admin's authority — a filesystem hiccup
-    # must not undo the created user.
+    # Private home under Users/<uid>. Best-effort — a filesystem hiccup must not
+    # undo the created user.
     try:
         svc.home.provision(token, ident.tenant, email)
     except Exception as e:
         log.warning("home folder provisioning failed for %s in %s: %s", email, ident.tenant, e)
-    _send_invite(svc, ident, email, body.display_name, body.roles)
-    return UserOut(uid=email, email=email, display_name=body.display_name, in_this_tenant=bool(body.roles))
+    _send_invite(svc, ident, email, display_name, roles)
+
+
+def _add_existing_to_tenant(svc: Services, ident: Identity, uid: str,
+                            roles: list[str], token: str) -> None:
+    """Add an existing account to this tenant: grant the roles it does not already
+    hold, provision its home here if new to the tenant, and send the informational
+    notice — never a set-password link."""
+    was_member = svc.ldap.is_tenant_member(uid, ident.tenant)
+    have = set(svc.ldap.user_roles(ident.tenant, uid))
+    add = [r for r in roles if r not in have]
+    if not svc.audit.emit(category="user", action="user_add_existing", outcome="ok",
+                          actor=ident.user, tenant=ident.tenant, target_uid=uid,
+                          target_type="principal", detail={"roles": add}):
+        raise HTTPException(status_code=503, detail="audit log unavailable")
+    for role in add:
+        svc.ldap.add_member(ident.tenant, role, uid)
+    if not was_member:
+        try:
+            svc.home.provision(token, ident.tenant, uid)
+        except Exception as e:
+            log.warning("home folder provisioning failed for %s in %s: %s", uid, ident.tenant, e)
+    # Notify only when they actually gained access here (new tenant, or new roles);
+    # a pure no-op sends nothing — but the caller's response is identical either way.
+    if add:
+        _notify_access_granted(svc, ident, uid, ", ".join(add))
 
 
 @router.post("/{uid}/reinvite", status_code=204)
