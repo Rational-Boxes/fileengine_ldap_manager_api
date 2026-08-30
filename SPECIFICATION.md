@@ -110,8 +110,22 @@ the defaults; a deployment overrides them via `FILEENGINE_LDAP_DOMAIN`,
 Scoped to their own `ou=<tenant>`:
 - **Roles:** list / create / delete role groups; add/remove members.
 - **Users:** list the tenant's own roster (§6.1), look up global users (exact
-  match, §6), create new global users (via the invite flow, §5), view a member's
-  profile, and assign/unassign users to this tenant's roles.
+  match, §6), create new global users (via the invite flow, §5, **with at least
+  one role** — see below), view a member's profile, and assign/unassign users to
+  this tenant's roles.
+- **Membership is holding ≥1 role (decision).** A tenant has no membership record
+  separate from its role groups: a user is a member of a tenant iff they hold at
+  least one of its roles (the same rule the bridges enforce via
+  `getTenantsForUser`). Two consequences the API makes concrete:
+  - **Creating a user requires ≥1 role.** `POST /v1/admin/users` with an empty
+    `roles` is refused (422). A role-less account would be a member of nothing
+    here — absent from the roster and unable to reach the tenant — so there is no
+    role-less member to create. Every named role must also already exist (400
+    otherwise), checked before anything is written.
+  - **Removing the last role removes the user from the tenant.** The roles editor
+    (`PUT …/roles`) will not reduce a member to zero roles; emptying membership is
+    a removal and goes through `DELETE …/{uid}?scope=tenant` (§4), which is the
+    same operation with its own confirmation.
 - **`administrators` group (decision):** may add/remove members **except
   themselves** (no self-removal → prevents lockout), and the **last administrator
   cannot be removed** (last-admin guard). The `administrators` group itself cannot
@@ -289,7 +303,7 @@ explain why an account cannot be deleted, without disclosing who else uses it.
 | `GET /v1/admin/users/{uid}/profile` | full profile of a **member** of this tenant (§6.1) |
 | `PUT /v1/admin/users/{uid}/roles` `{roles[]}` | set their roles here to exactly this set (server diffs; admin guards apply) |
 | `DELETE /v1/admin/users/{uid}?scope=tenant\|system` | remove from the tenant, or delete the global account (§4) |
-| `POST /v1/admin/users` `{email, display_name, roles?[]}` | create new global user + invite |
+| `POST /v1/admin/users` `{email, display_name, roles[]}` | create new global user + invite (**≥1 existing role required**; empty → 422, unknown role → 400) |
 | `POST /v1/admin/users/{uid}/reinvite` | resend the invite |
 | `GET /v1/admin/email-templates` | list the tenant's two template kinds (custom or default) |
 | `GET /v1/admin/email-templates/{kind}` | get one (`new_user` / `access_granted`) |

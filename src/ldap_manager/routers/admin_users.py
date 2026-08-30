@@ -85,6 +85,15 @@ def create_user(body: UserCreate, svc: Services = Depends(services),
     email = str(body.email)
     if svc.ldap.get_user(email):
         raise HTTPException(status_code=409, detail="user already exists; assign them to a role instead")
+    # A member holds >=1 role (the schema already requires the list be non-empty);
+    # every named role must also EXIST in this tenant. Checked before anything is
+    # written, because a bogus role would otherwise make add_member fail partway
+    # and leave a created account that is a member of nothing — the very ghost the
+    # >=1-role rule exists to prevent.
+    known = {r["name"] for r in svc.ldap.list_roles(ident.tenant)}
+    unknown = sorted(set(body.roles) - known)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"unknown role(s): {', '.join(unknown)}")
     # Fail-closed write-ahead (§6): record the user creation (+ its role grants)
     # before the directory is mutated.
     if not svc.audit.emit(category="user", action="user_create", outcome="ok",

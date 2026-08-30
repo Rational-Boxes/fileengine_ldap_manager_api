@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 # --- roles ---
@@ -40,7 +40,21 @@ class RoleOut(BaseModel):
 class UserCreate(BaseModel):
     email: EmailStr
     display_name: str = Field(min_length=1, max_length=128)
-    roles: list[str] = Field(default_factory=list)
+    # At least one role is REQUIRED. Membership of a tenant IS holding >=1 group
+    # under its ou (getTenantsForUser), so a user created with no role would not be
+    # a member of the tenant at all — an account that never appears on the roster
+    # and cannot reach the tenant. Creating a user in a tenant and granting them a
+    # role here are the same act; there is no role-less member to create.
+    roles: list[str] = Field(min_length=1)
+
+    @field_validator("roles")
+    @classmethod
+    def _at_least_one_real_role(cls, v: list[str]) -> list[str]:
+        cleaned = [r.strip() for r in v if r and r.strip()]
+        if not cleaned:
+            raise ValueError("at least one role is required (a user with no role is "
+                             "not a member of the tenant)")
+        return cleaned
 
 
 class UserOut(BaseModel):

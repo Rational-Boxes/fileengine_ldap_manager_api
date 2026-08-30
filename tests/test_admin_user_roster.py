@@ -144,6 +144,44 @@ def env():
     app.dependency_overrides.clear()
 
 
+# ------------------------------ the invite gate ----------------------------
+
+def test_invite_requires_at_least_one_role(env):
+    # Membership of a tenant IS holding >=1 role, so a role-less invite would
+    # create an account that is a member of nothing here. Rejected by the schema
+    # before anything is written.
+    c, fake = env
+    hdr = {"Authorization": "Bearer x"}
+    r = c.post("/v1/admin/users", json={"email": "new@acme.com", "display_name": "New"}, headers=hdr)
+    assert r.status_code == 422
+    r2 = c.post("/v1/admin/users",
+                json={"email": "new@acme.com", "display_name": "New", "roles": []}, headers=hdr)
+    assert r2.status_code == 422
+    assert fake.audit.events == []
+    assert "new@acme.com" not in fake.ldap.users
+
+
+def test_invite_rejects_a_blank_only_role_list(env):
+    c, fake = env
+    r = c.post("/v1/admin/users",
+               json={"email": "new@acme.com", "display_name": "New", "roles": ["", "  "]},
+               headers={"Authorization": "Bearer x"})
+    assert r.status_code == 422
+    assert fake.audit.events == []
+
+
+def test_invite_rejects_an_unknown_role_before_creating_anything(env):
+    # A bogus role would make the grant fail partway and leave a created account
+    # that is a member of nothing — so it is caught before the write-ahead.
+    c, fake = env
+    r = c.post("/v1/admin/users",
+               json={"email": "new@acme.com", "display_name": "New", "roles": ["editors", "wizards"]},
+               headers={"Authorization": "Bearer x"})
+    assert r.status_code == 400 and "wizards" in r.json()["detail"]
+    assert fake.audit.events == []
+    assert "new@acme.com" not in fake.ldap.users
+
+
 # ------------------------------- the roster --------------------------------
 
 def test_roster_lists_every_member_with_their_roles(env):
