@@ -32,10 +32,35 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
-# Full owner control, one letter per ACL grant (the permissions API takes a single
-# permission per call): read, write, delete, list-deleted, undelete, view-versions,
-# retrieve-version, restore-version, manage-ACL.
-FULL_CONTROL = ["r", "w", "d", "l", "u", "v", "b", "s", "m"]
+# Full owner control, one grant per call (the permissions API takes a single
+# permission at a time): read, write, delete, list-deleted, undelete,
+# view-versions, retrieve-version, restore-version, manage-ACL, cull-versions.
+#
+# CULL_VERSIONS is spelled out because it has no single-letter alias at the
+# bridge. That matters more than it looks: coercePermission falls back to READ
+# for anything it does not recognise, so a wrong spelling here would not fail —
+# it would silently grant read and leave the user unable to purge versions, with
+# nothing anywhere saying why.
+#
+# Both destroy-data bits are granted deliberately, and only here. The core
+# withholds them everywhere by default because they irreversibly destroy
+# committed data — but inside YOUR OWN home that is housekeeping, not risk: a
+# user who cannot purge old versions of their own files cannot reclaim their own
+# space, and one who cannot truly delete cannot honour a request to be forgotten
+# about their own content.
+#
+# CULL_VERSIONS reaches everything in the home: the entry carries ACL_INHERIT, so
+# the rule is copied down as files and folders are created beneath it.
+#
+# ERASE DOES NOT, and that is worth stating plainly rather than discovering:
+#   * inherit_acls strips it when copying rules to children
+#     (core/src/acl_manager.cpp — `inheritable = rule.permissions & ~ERASE`),
+#     so this grant applies to the home FOLDER and not to the files in it;
+#   * the erase OPERATION does not exist yet — no RPC in the proto, no handler
+#     in the core, no route in the bridge.
+# So today this records the intent and nothing more. Both gaps are core-side
+# work; when they close, the ACL is already right.
+FULL_CONTROL = ["r", "w", "d", "l", "u", "v", "b", "s", "m", "CULL_VERSIONS", "ERASE"]
 USERS_FOLDER = "Users"
 
 
