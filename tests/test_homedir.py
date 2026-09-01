@@ -52,6 +52,41 @@ def test_creates_home_and_sets_private_acl():
     assert deny_path == "/v1/nodes/H/permissions"
 
 
+def test_owner_gets_the_destroy_data_bits_in_their_own_home():
+    """The two permissions the core never grants by default.
+
+    CULL_VERSIONS and ERASE irreversibly destroy committed data, so they are
+    withheld everywhere — but inside your OWN home that is housekeeping: without
+    them a user cannot reclaim their own space, or truly delete their own
+    content.
+
+    Asserted by name rather than through FULL_CONTROL, which the other tests
+    derive from: a regression that dropped either from that list would keep
+    every one of them green.
+    """
+    assert "CULL_VERSIONS" in FULL_CONTROL
+    assert "ERASE" in FULL_CONTROL
+
+    hp = _provisioner(
+        [(200, {"entries": [{"uid": "U", "name": "Users"}]}),
+         (201, {"uid": "H"})]
+        + [(204, None)] * len(FULL_CONTROL)
+        + [(204, None)]
+    )
+    hp.provision("tok", "acme", "alice@x")
+    grants = hp.calls[2:2 + len(FULL_CONTROL)]
+    for perm in ("CULL_VERSIONS", "ERASE"):
+        matching = [c for c in grants if c[2]["permission"] == perm]
+        assert len(matching) == 1, perm
+        assert matching[0][2] == {
+            "principal": "alice@x", "permission": perm, "effect": "allow",
+        }
+    # Spelled out, never abbreviated: the bridge has no letter alias for it and
+    # falls back to READ for anything it does not recognise, so a letter here
+    # would silently grant read instead of failing.
+    assert "c" not in FULL_CONTROL
+
+
 def test_idempotent_reuses_existing_home():
     hp = _provisioner(
         [(200, {"entries": [{"uid": "U", "name": "Users"}]}),    # find Users
