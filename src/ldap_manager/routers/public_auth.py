@@ -21,6 +21,7 @@ an address exists.
 from __future__ import annotations
 
 import hashlib
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -31,6 +32,7 @@ from ..templates import DEFAULTS, PASSWORD_RESET
 from .. import email as email_mod
 from .. import tokens as tok
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1")
 
 
@@ -101,16 +103,33 @@ def reset_request(body: ResetRequest, request: Request, svc: Services = Depends(
             # The stock reset subject carries no placeholders, so this one was
             # not visibly broken — but it skipped render() like the other two,
             # which made it a trap for the first person to customize it.
+            # The ADDRESS, not the uid. For every account created through this
+            # service the two are the same string, which is why addressing the
+            # uid worked everywhere it was ever tried. The platform's original
+            # administrator is the exception — uid=james, mail=james@… — and for
+            # that account the message was handed to SMTP with "james" as the
+            # recipient, which no MTA can deliver.
+            #
+            # _to_user already resolves this: `email` is the mail attribute and
+            # falls back to the uid when there is none, so this is correct for
+            # both shapes.
+            recipient = user.get("email") or user["uid"]
             ctx = {
                 "display_name": user.get("display_name", user["uid"]),
-                "email": user["uid"],
+                "email": recipient,
                 "reset_link": link,
                 "expires": f"{svc.settings.reset_ttl_hours}h",
             }
-            svc.mailer.send(user["uid"], email_mod.render_subject(tmpl.subject, ctx),
+            # The TOKEN is still issued against the uid, deliberately: it is the
+            # directory key /reset/confirm sets the password by. Only the
+            # delivery address differs.
+            svc.mailer.send(recipient, email_mod.render_subject(tmpl.subject, ctx),
                             email_mod.render(tmpl.body, ctx))
     except Exception:
-        pass
+        # Swallowed so the response cannot reveal whether the address exists —
+        # but LOGGED, because it was the silence that hid this: a reset that was
+        # never delivered looked identical, from every side, to one that was.
+        log.exception("password reset for %s could not be completed", email)
     return {"status": "ok"}
 
 
