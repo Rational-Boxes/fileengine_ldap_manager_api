@@ -158,3 +158,19 @@ def test_a_failing_mailer_still_returns_200_but_is_logged(caplog):
     assert r.status_code == 200 and r.json()["status"] == "ok"
     assert any("could not be completed" in rec.message for rec in caplog.records), \
         "a reset that fails must not fail silently"
+
+
+def test_the_link_is_built_from_the_configured_base_and_carries_the_token(monkeypatch):
+    """The link must come from RESET_LINK_BASE, which the deployment points at
+    the sign-in origin (login.<base>) rather than any one tenant's host — these
+    messages go to people who cannot sign in, so addressing them to a tenant they
+    may not belong to is wrong even though it resolves."""
+    from ldap_manager import templates as tmpl_mod
+    stock = tmpl_mod.DEFAULTS[tmpl_mod.PASSWORD_RESET]
+    monkeypatch.setitem(tmpl_mod.DEFAULTS, tmpl_mod.PASSWORD_RESET,
+                        type(stock)(subject=stock.subject, body="{{reset_link}}"))
+
+    client, mailer, _ = _app(JAMES)
+    client.post("/v1/reset/request", json={"email": "james@rationalboxes.com"})
+    _to, _subject, body = mailer.sent[0]
+    assert "https://login.example.com/reset-password?token=tok-123" in body
