@@ -76,5 +76,29 @@ def test_identity_is_tenant_scoped():
               "roles": {"t1": ["users", "administrators"], "t2": ["users"]}}
     assert identity_from_claims(claims, "t1") == ("a@b", ["users", "administrators"])
     assert identity_from_claims(claims, "t2") == ("a@b", ["users"])
-    assert identity_from_claims(claims, "t3") == ("a@b", [])          # unknown tenant → no roles
+    # t3 is absent from the map, so the token does not attest membership of it.
+    # This used to answer ("a@b", []) — an authenticated caller in a tenant they
+    # are not a member of. Membership IS the presence of the key.
+    assert identity_from_claims(claims, "t3") is None
     assert identity_from_claims(claims, "") == ("a@b", ["users", "administrators"])  # falls back to token tenant
+
+
+def test_a_token_is_refused_for_a_tenant_it_does_not_attest():
+    """The membership rule this service applies everywhere else, on the token path.
+
+    Every directory operation here already runs against `tenant_dn(tenant)`;
+    the token helper was the one path that resolved a non-member to an empty
+    role list instead of refusing.
+    """
+    claims = {"sub": "a@b", "tenant": "alpha", "roles": {"alpha": ["users"]}}
+    assert identity_from_claims(claims, "alpha") == ("a@b", ["users"])
+    assert identity_from_claims(claims, "beta") is None
+
+
+def test_membership_with_no_roles_is_still_membership():
+    claims = {"sub": "a@b", "tenant": "alpha", "roles": {"alpha": []}}
+    assert identity_from_claims(claims, "alpha") == ("a@b", [])
+
+
+def test_non_bridge_tokens_are_left_alone():
+    assert identity_from_claims({"sub": "svc"}, "alpha") == ("svc", [])
