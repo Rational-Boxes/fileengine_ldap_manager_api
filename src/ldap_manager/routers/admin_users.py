@@ -33,7 +33,7 @@ from ..schemas import (AdminUserDetail, RosterUserOut, UserCreate, UserOut, User
 from ..templates import NEW_USER
 from .. import email as email_mod
 from .. import tokens as tok
-from .admin_roles import ADMINS, _notify_access_granted
+from .admin_roles import ADMINS, _notify_access_granted, reject_system_roles
 
 router = APIRouter(prefix="/v1/admin/users")
 
@@ -105,6 +105,9 @@ def create_user(body: UserCreate, svc: Services = Depends(services),
     unknown = sorted(set(body.roles) - known)
     if unknown:
         raise HTTPException(status_code=400, detail=f"unknown role(s): {', '.join(unknown)}")
+    # `known` comes from LDAP, which still holds the system roles — being a real
+    # role is what makes this reachable, so existence is not the check.
+    reject_system_roles(body.roles, "assigned")
 
     existing = svc.ldap.get_user(email)
     if existing:
@@ -267,6 +270,11 @@ def set_user_roles(uid: str, body: UserRolesUpdate, svc: Services = Depends(serv
                             detail="a member must hold at least one role; remove them from the tenant instead")
     if not add and not drop:
         return _detail(svc, ident, user, current)
+    # ADD only. A drop cannot reach a worker — they live in ou=services, outside
+    # ldap_user_base, so _member_or_404 never resolves one — so the only thing a
+    # drop can clear is a person who wrongly holds the role, which is a
+    # correction. Blocking it would make that mistake unfixable through the API.
+    reject_system_roles(add, "assigned")
     if ADMINS in drop:
         _guard_admin_removal(svc, ident, target)
     # Fail-closed write-ahead (§6): the whole diff is recorded before any of it

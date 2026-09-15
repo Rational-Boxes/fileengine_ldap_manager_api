@@ -133,6 +133,64 @@ def test_delete_role_emits_role_delete():
     assert _emitted(fake, "role_delete")
 
 
+def test_add_member_refuses_a_system_role():
+    """Assigning `file_services` to a person hands them worker-level rights
+    across the whole tenant. The SPA never offers it; the route still did."""
+    ldap = MagicMock()
+    ldap.is_tenant_member.return_value = True
+    fake = _FakePub()
+    r = _admin_client(fake, ldap=ldap).post(
+        "/v1/admin/roles/file_services/members", json={"uid": "bob"})
+    assert r.status_code == 400
+    assert "system role" in r.json()["detail"]
+    ldap.add_member.assert_not_called()
+    assert not _emitted(fake, "role_assign_user")
+
+
+def test_remove_member_refuses_a_system_role():
+    """The members are the svc-* worker accounts; dropping one takes that
+    worker's rights away exactly as deleting the role takes all four."""
+    ldap = MagicMock()
+    fake = _FakePub()
+    r = _admin_client(fake, ldap=ldap).delete(
+        "/v1/admin/roles/file_services/members/svc-csai")
+    assert r.status_code == 400
+    ldap.remove_member.assert_not_called()
+    assert not _emitted(fake, "role_remove_user")
+
+
+def test_delete_role_refuses_a_system_role():
+    """`file_services` is the workers' role; deleting it strips read/write from
+    all four at once, and the symptom surfaces later as scattered
+    PermissionDenied rather than as anything pointing back here. The SPA hides
+    it, but the route is still reachable directly — so the refusal lives here."""
+    ldap = MagicMock()
+    fake = _FakePub()
+    r = _admin_client(fake, ldap=ldap).delete("/v1/admin/roles/file_services")
+    assert r.status_code == 400
+    assert "system role" in r.json()["detail"]
+    ldap.delete_role.assert_not_called()
+
+
+def test_delete_role_refusal_is_not_audited():
+    """Matches the administrators guard: the write-ahead records a privilege
+    change that is ABOUT to happen, so a refusal must not leave a role_delete
+    in the log claiming one did."""
+    fake = _FakePub()
+    r = _admin_client(fake).delete("/v1/admin/roles/file_services")
+    assert r.status_code == 400
+    assert not _emitted(fake, "role_delete")
+
+
+def test_delete_role_still_allows_an_ordinary_role():
+    """The guard must be exact, not a prefix or substring match."""
+    ldap = MagicMock()
+    fake = _FakePub()
+    for name in ("editors", "file_services_reviewers", "services"):
+        r = _admin_client(fake, ldap=ldap).delete(f"/v1/admin/roles/{name}")
+        assert r.status_code == 204, name
+
+
 def test_add_member_emits_role_assign_user():
     ldap = MagicMock()
     ldap.is_tenant_member.return_value = True  # not first grant -> skip email

@@ -494,3 +494,65 @@ def test_removal_skips_credential_purge_when_the_store_is_disabled(env):
     r = c.delete("/v1/admin/users/ann@acme.test")
     assert r.status_code == 200 and r.json()["credentials_purged"] == 0
     assert fake.service_cred.purged == []
+
+
+# --------------------------- system roles ----------------------------------
+#
+# `file_services` is the per-tenant role the four background workers hold. The
+# SPA hides it from every picker, but hiding a control is not a guard — these
+# routes stay reachable by direct call, and assigning the role hands a person
+# worker-level rights across the whole tenant.
+
+def _with_system_role(fake):
+    """The role exists in the directory, which is exactly what makes these
+    routes reachable: it passes the `known` / existence checks."""
+    fake.ldap.roles[TENANT]["file_services"] = ["svc-csai"]
+
+
+def test_invite_cannot_assign_a_system_role(env):
+    c, fake = env
+    _with_system_role(fake)
+    r = c.post("/v1/admin/users",
+               json={"email": "new@acme.com", "display_name": "New",
+                     "roles": ["editors", "file_services"]},
+               headers={"Authorization": "Bearer x"})
+    assert r.status_code == 400
+    assert "system role" in r.json()["detail"]
+    # Refused before any write: no half-added principal, no audit row.
+    assert "new@acme.com" not in fake.ldap.users
+    assert fake.audit.events == []
+
+
+def test_set_roles_cannot_add_a_system_role(env):
+    c, fake = env
+    _with_system_role(fake)
+    r = c.put("/v1/admin/users/ann@acme.test/roles",
+              json={"roles": ["editors", "file_services"]})
+    assert r.status_code == 400
+    assert "system role" in r.json()["detail"]
+    assert fake.ldap.user_roles(TENANT, "ann@acme.test") == ["editors"]
+    assert "ann@acme.test" not in fake.ldap.roles[TENANT]["file_services"]
+
+
+def test_set_roles_may_still_DROP_a_system_role_a_person_wrongly_holds(env):
+    """A drop cannot reach a worker — they live in ou=services, outside
+    ldap_user_base — so the only thing it can clear is a person who should
+    never have held the role. Blocking that would make the mistake unfixable
+    through the API."""
+    c, fake = env
+    _with_system_role(fake)
+    fake.ldap.roles[TENANT]["file_services"].append("ann@acme.test")
+    r = c.put("/v1/admin/users/ann@acme.test/roles", json={"roles": ["editors"]})
+    assert r.status_code == 200
+    assert "ann@acme.test" not in fake.ldap.roles[TENANT]["file_services"]
+
+
+def test_ordinary_roles_are_unaffected(env):
+    """The guard must be exact — a tenant's own role that merely contains the
+    name is not plumbing."""
+    c, fake = env
+    fake.ldap.roles[TENANT]["file_services_reviewers"] = []
+    r = c.put("/v1/admin/users/ann@acme.test/roles",
+              json={"roles": ["editors", "file_services_reviewers"]})
+    assert r.status_code == 200
+    assert "ann@acme.test" in fake.ldap.roles[TENANT]["file_services_reviewers"]
