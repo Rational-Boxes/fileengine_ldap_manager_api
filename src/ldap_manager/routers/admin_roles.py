@@ -30,6 +30,21 @@ from ..schemas import MemberAdd, RoleCreate, RoleOut
 router = APIRouter(prefix="/v1/admin/roles")
 ADMINS = "administrators"
 
+# Roles that exist to make the platform work, not to be administered.
+#
+# ``file_services`` is the per-tenant role the four background workers hold
+# (difference, discussion, csai, folder_actions). The workers themselves live in
+# ``ou=services``, outside ``ldap_user_base``, so they are already invisible to
+# every user-facing lookup; the role is not, because it is a group under the
+# tenant exactly like ``administrators``.
+#
+# Deleting it strips read/write from all four workers at once, and the symptom
+# would surface much later as scattered PermissionDenied rather than as anything
+# pointing back here. The SPA hides the role (see the frontend's
+# ``utils/systemRoles.ts``), but hiding a control is not a guard: the route is
+# still reachable by direct call, so the refusal has to live here too.
+SYSTEM_ROLES = frozenset({"file_services"})
+
 
 @router.get("", response_model=list[RoleOut])
 def list_roles(svc: Services = Depends(services), ident: Identity = Depends(require_tenant_admin)):
@@ -51,6 +66,14 @@ def create_role(body: RoleCreate, svc: Services = Depends(services), ident: Iden
 def delete_role(role: str, svc: Services = Depends(services), ident: Identity = Depends(require_tenant_admin)):
     if role == ADMINS:
         raise HTTPException(status_code=400, detail="the administrators group cannot be deleted")
+    if role in SYSTEM_ROLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{role} is a system role and cannot be deleted",
+        )
+    # Refusals are deliberately NOT audited, matching the administrators guard
+    # above: the write-ahead below records a privilege change that is about to
+    # happen, and nothing happened here.
     if not svc.audit.emit(category="user", action="role_delete", outcome="ok",
                           actor=ident.user, tenant=ident.tenant, target_uid=role,
                           target_type="role"):
