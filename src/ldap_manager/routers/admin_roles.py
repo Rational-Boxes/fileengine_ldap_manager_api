@@ -46,6 +46,31 @@ ADMINS = "administrators"
 SYSTEM_ROLES = frozenset({"file_services"})
 
 
+def reject_system_roles(names, action: str) -> None:
+    """Refuse any attempt to administer a system role.
+
+    Every route that can assign, remove or delete one funnels through here, and
+    ALL of them need it, not just the obvious one:
+
+      * assigning it (role members, set-roles, invite) hands a person
+        worker-level rights across the whole tenant;
+      * removing a member strips a worker of the role it binds with;
+      * deleting it does that to all four at once.
+
+    Membership is provisioned by Ansible (``playbooks/service_accounts.yml``),
+    which is the only thing that should ever write it.
+
+    Callers must invoke this BEFORE the audit write-ahead. That log records a
+    privilege change that is about to happen; a refusal is not one.
+    """
+    hit = sorted({n for n in names if n in SYSTEM_ROLES})
+    if hit:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{', '.join(hit)}: system role, cannot be {action}",
+        )
+
+
 @router.get("", response_model=list[RoleOut])
 def list_roles(svc: Services = Depends(services), ident: Identity = Depends(require_tenant_admin)):
     return [RoleOut(**r) for r in svc.ldap.list_roles(ident.tenant)]
@@ -66,14 +91,10 @@ def create_role(body: RoleCreate, svc: Services = Depends(services), ident: Iden
 def delete_role(role: str, svc: Services = Depends(services), ident: Identity = Depends(require_tenant_admin)):
     if role == ADMINS:
         raise HTTPException(status_code=400, detail="the administrators group cannot be deleted")
-    if role in SYSTEM_ROLES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{role} is a system role and cannot be deleted",
-        )
     # Refusals are deliberately NOT audited, matching the administrators guard
     # above: the write-ahead below records a privilege change that is about to
     # happen, and nothing happened here.
+    reject_system_roles([role], "deleted")
     if not svc.audit.emit(category="user", action="role_delete", outcome="ok",
                           actor=ident.user, tenant=ident.tenant, target_uid=role,
                           target_type="role"):
@@ -88,6 +109,7 @@ def list_members(role: str, svc: Services = Depends(services), ident: Identity =
 
 @router.post("/{role}/members", status_code=204)
 def add_member(role: str, body: MemberAdd, svc: Services = Depends(services), ident: Identity = Depends(require_tenant_admin)):
+    reject_system_roles([role], "assigned")
     # First membership in this tenant → access_granted email (§5-B).
     first_grant = not svc.ldap.is_tenant_member(body.uid, ident.tenant)
     if not svc.audit.emit(category="user", action="role_assign_user", outcome="ok",
@@ -101,6 +123,9 @@ def add_member(role: str, body: MemberAdd, svc: Services = Depends(services), id
 
 @router.delete("/{role}/members/{uid}", status_code=204)
 def remove_member(role: str, uid: str, svc: Services = Depends(services), ident: Identity = Depends(require_tenant_admin)):
+    # The members here are the svc-* worker accounts; dropping one takes that
+    # worker's rights away exactly as deleting the role takes all four.
+    reject_system_roles([role], "modified")
     if role == ADMINS:
         if uid == ident.user:
             raise HTTPException(status_code=400, detail="you cannot remove yourself from administrators")
