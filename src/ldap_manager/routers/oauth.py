@@ -41,6 +41,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from .. import oauth_store, oauth_tokens
 from ..deps import Services, require_identity, services
+from ..tenant_state import PostgresTenantState, TenantStateGate
 
 router = APIRouter(tags=["oauth"])
 
@@ -61,6 +62,26 @@ def _require_stores(svc: Services):
         raise HTTPException(status_code=503, detail="oauth client store unavailable (no DATABASE_URL)")
     if not svc.oauth_codes.enabled:
         raise HTTPException(status_code=503, detail="oauth code store unavailable (no REDIS_URL)")
+
+
+# ── tenant state (§3.4c) ────────────────────────────────────────────────────
+#
+# Bridge sessions die within 15 minutes of a suspension and cannot be renewed,
+# because refresh goes back through the bridge, which refuses. OAuth clients
+# never touch the bridge: this endpoint issues their 1-hour access and 14-day
+# refresh tokens, so until 2026-10-01 a suspended tenant's integrations (BCF)
+# could renew indefinitely. Same rule, cache and fail-closed behaviour as the
+# other doors (tenant_state.py, pinned against the C++ doors' policy header).
+TENANT_GATE = TenantStateGate()
+
+
+def _require_live_tenant(svc: Services, tenant: str, error: str = "invalid_grant"):
+    if TENANT_GATE._source is None and svc.settings.database_url:
+        TENANT_GATE.set_source(PostgresTenantState(svc.settings.database_url))
+    ok, reason = TENANT_GATE.admits(tenant)
+    if not ok:
+        raise HTTPException(status_code=400, detail={"error": error,
+                                                     "error_description": reason})
 
 
 def _issuer(svc: Services) -> str:
@@ -323,6 +344,8 @@ def _token_response(svc: Services, *, subject, tenant, client_id, scope, roles,
                     issue_id: bool, issue_refresh: bool, nonce="", auth_time=None,
                     email="", name="") -> dict:
     st = svc.settings
+    # Every grant mints here, so no grant can skip it.
+    _require_live_tenant(svc, tenant)
     access = oauth_tokens.issue_access_token(
         svc.oauth_keys, issuer=_issuer(svc), subject=subject, tenant=tenant,
         client_id=client_id, scope=scope, ttl=st.oauth_access_ttl, roles=roles)
@@ -381,6 +404,11 @@ def token(
             email=payload.get("email", ""), name=payload.get("name", "")))
 
     if grant_type == "refresh_token":
+        # BEFORE rotation consumes it: a refusal must leave the token intact, so a
+        # client works again the moment its tenant is resumed.
+        peeked = svc.oauth_codes.peek_refresh(refresh_token)
+        if peeked is not None and peeked.get("client_id") == client.client_id:
+            _require_live_tenant(svc, peeked.get("tenant", ""))
         payload = svc.oauth_codes.consume_refresh(refresh_token)
         if payload is None or payload.get("client_id") != client.client_id:
             raise HTTPException(status_code=400, detail={"error": "invalid_grant"})
@@ -401,6 +429,10 @@ def token(
             raise HTTPException(status_code=400, detail={"error": "unauthorized_client"})
         requested = [s for s in (scope or "").split() if s]
         gscope = " ".join([s for s in requested if s in client.scopes]) or " ".join(client.scopes)
+        # The client's own tenant, refused as `unauthorized_client`: a service
+        # identity of a suspended tenant is not authorised, there is no grant to
+        # call invalid.
+        _require_live_tenant(svc, client.tenant, error="unauthorized_client")
         # No id_token / refresh for a service identity; sub is the client itself.
         return JSONResponse(_token_response(
             svc, subject=client.client_id, tenant=client.tenant, client_id=client.client_id,

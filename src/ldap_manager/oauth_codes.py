@@ -87,6 +87,20 @@ class OAuthCodeStore:
             self._r.setex(self._key(_REFRESH, token), ttl_seconds, json.dumps(payload))
         return token
 
+    def peek_refresh(self, token: str) -> Optional[dict]:
+        """Read a refresh token's payload WITHOUT consuming it.
+
+        For checks that must run before rotation: a refusal that consumed the token
+        would destroy it, and the client would have to re-authorise even after the
+        reason for refusing had passed (a suspended tenant being resumed). Rotation
+        itself stays the atomic GETDEL in consume_refresh."""
+        if self._r is None or not token:
+            return None
+        raw = self._r.get(self._key(_REFRESH, token))
+        if raw is None:
+            return None
+        return json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+
     def consume_refresh(self, token: str) -> Optional[dict]:
         """Rotation: atomically fetch + delete the presented refresh token (the
         caller issues a fresh one). A reused/rotated token is therefore rejected."""
