@@ -141,6 +141,10 @@ class Settings:
     service_cred_max_per_user: int = 10       # per-user credential cap
     service_cred_internal_secret: str = ""    # guards /internal/service-cred/verify (falls back to mfa_internal_secret)
 
+    # --- tenant onboarding (the welcome mail a newly provisioned tenant's admin gets) ---
+    onboarding_internal_secret: str = ""      # guards /internal/tenants/*/welcome (falls back to mfa_internal_secret)
+    welcome_reset_ttl_hours: int = 72         # the welcome mail's set-your-password link
+
     # --- OAuth 2.0 / OIDC authority (Phase 1.7) — FileEngine as an authorization
     # server so CMS/web-portals, ONLYOFFICE, and service integrations delegate to it. ---
     oauth_enabled: bool = False               # master switch for the authority
@@ -228,6 +232,8 @@ def load_settings() -> "Settings":
         service_cred_pepper=_env("SERVICE_CRED_HASH_PEPPER", ""),
         service_cred_max_per_user=_int("SERVICE_CRED_MAX_PER_USER", 10),
         service_cred_internal_secret=_env("SERVICE_CRED_INTERNAL_SECRET", ""),
+        onboarding_internal_secret=_env("ONBOARDING_INTERNAL_SECRET", ""),
+        welcome_reset_ttl_hours=_int("WELCOME_RESET_TTL_HOURS", 72),
         oauth_enabled=_bool("OAUTH_ENABLED", False),
         oauth_issuer=_env("OAUTH_ISSUER", "").rstrip("/"),
         oauth_authorize_ui=_env("OAUTH_AUTHORIZE_UI", "").rstrip("/"),
