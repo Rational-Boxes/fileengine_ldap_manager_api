@@ -64,3 +64,86 @@ def test_ip_in_cidrs():
     assert not sc._ip_in_cidrs("10.0.1.5", ["10.0.0.0/24"])
     assert not sc._ip_in_cidrs(None, ["10.0.0.0/24"])       # missing IP → fail-closed
     assert not sc._ip_in_cidrs("10.0.0.5", ["garbage"])     # unparseable entry ignored
+
+
+def test_api_scope_is_known():
+    # The REST door's scope; appended last so existing orderings are unchanged.
+    assert sc.normalize_scopes(["api"]) == ["api"]
+    assert sc.normalize_scopes(["api", "webdav", "mcp"]) == ["webdav", "mcp", "api"]
+
+
+def test_secret_generation_tracks_the_stored_hash():
+    pepper = "pepper-abc"
+    old = sc.hash_secret(pepper, sc.generate_secret())
+    new = sc.hash_secret(pepper, sc.generate_secret())
+    assert sc.secret_generation(old) == sc.secret_generation(old)   # stable
+    assert sc.secret_generation(old) != sc.secret_generation(new)   # rotation changes it
+    assert len(sc.secret_generation(old)) == 16
+
+
+class _FakeCursor:
+    def __init__(self, row):
+        self.row, self.updates = row, 0
+
+    def execute(self, sql, params=None):
+        if sql.startswith("UPDATE"):
+            self.updates += 1
+
+    def fetchone(self):
+        return self.row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, cur):
+        self.cur = cur
+
+    def cursor(self):
+        return self.cur
+
+    def commit(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _store_with(row):
+    class S:
+        service_cred_pepper = "pepper-abc"
+        database_url = "postgres://unused"
+    store = sc.ServiceCredentialStore(S())
+    cur = _FakeCursor(row)
+    store._connect = lambda: _FakeConn(cur)
+    return store, cur
+
+
+def test_status_and_authenticate_share_one_rule():
+    secret = sc.generate_secret()
+    blob = sc.hash_secret("pepper-abc", secret)
+    gen = sc.secret_generation(blob)
+    store, cur = _store_with(("alice", blob, ["api"], []))
+    assert store.authenticate(key_id="k", secret=secret, tenant="t", scope="api") == ("alice", gen)
+    assert store.authenticate(key_id="k", secret=secret + "x", tenant="t", scope="api") is None
+    # status needs no secret, and agrees on the generation
+    assert store.status(key_id="k", tenant="t", scope="api") == ("alice", gen)
+    # a key not scoped to the REST door is refused by both
+    assert store.status(key_id="k", tenant="t", scope="webdav") is None
+    assert store.verify(key_id="k", secret=secret, tenant="t", scope="mcp") is None
+
+
+def test_status_refuses_a_missing_or_pinned_out_key():
+    blob = sc.hash_secret("pepper-abc", sc.generate_secret())
+    store, _ = _store_with(None)                     # revoked / expired / other tenant
+    assert store.status(key_id="k", tenant="t", scope="api") is None
+    store, _ = _store_with(("alice", blob, ["api"], ["10.0.0.0/8"]))
+    assert store.status(key_id="k", tenant="t", scope="api", source_ip="192.0.2.1") is None
+    assert store.status(key_id="k", tenant="t", scope="api", source_ip="10.1.2.3") is not None
