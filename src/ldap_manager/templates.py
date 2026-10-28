@@ -38,6 +38,7 @@ ACCESS_GRANTED = "access_granted"
 PASSWORD_RESET = "password_reset"   # system-level (not per-tenant)
 TWO_FA_EMAIL = "2fa_email_code"     # tenant-customizable one-time 2FA email code
 SHARE_OTP_EMAIL = "share_otp_code"  # one-time code for an outside share-link recipient
+TENANT_WELCOME = "tenant_welcome"   # system-level: a new tenant's first administrator
 
 # Allowed placeholders per kind (§5.1 / §5.2). A PUT with any others is rejected.
 ALLOWED: dict[str, set[str]] = {
@@ -49,6 +50,8 @@ ALLOWED: dict[str, set[str]] = {
     # to greet them by. `sender` is the link's creator -- the one piece of
     # context that tells a stranger why an unfamiliar domain is mailing them.
     SHARE_OTP_EMAIL: {"email", "code", "expires", "sender", "sent_at"},
+    TENANT_WELCOME: {"display_name", "email", "tenant", "tenant_name", "sign_in_url",
+                     "drive_host", "reset_link", "expires"},
 }
 
 TENANT_KINDS = (NEW_USER, ACCESS_GRANTED, TWO_FA_EMAIL, SHARE_OTP_EMAIL)
@@ -121,6 +124,38 @@ DEFAULTS: dict[str, Template] = {
             " {{email}} by {{sender}}. If that means nothing to you, ignore this"
             " message -- the code is useless on its own and we will not email"
             " you again unless someone requests another.</p>"
+        ),
+    ),
+    # Sent once, when the deployment has finished building a tenant. System-level,
+    # not tenant-customizable: the tenant's own administrators do not exist as
+    # editors until this mail has been read.
+    #
+    # The reset link is offered whether or not the account is new. A new account
+    # was created with a random password nobody knows, so the link is the only way
+    # in; an existing account keeps its password, and the link is there for
+    # whoever does not remember it. The copy says both, rather than implying the
+    # recipient has to act.
+    TENANT_WELCOME: Template(
+        subject="Your workspace {{tenant_name}} is ready",
+        body=(
+            "<p>Hi {{display_name}},</p>"
+            "<p>The workspace <strong>{{tenant_name}}</strong> has been set up and you"
+            " are its administrator.</p>"
+            "<p><a href=\"{{sign_in_url}}\">Sign in to {{tenant_name}}</a> with"
+            " {{email}}.</p>"
+            "<p>If this is a new account, or you do not know its password, set one"
+            " here first (the link expires in {{expires}}):<br>"
+            "<a href=\"{{reset_link}}\">Set your password</a></p>"
+            "<p>Getting started:</p>"
+            "<ol>"
+            "<li>Sign in and turn on two-factor authentication under your profile.</li>"
+            "<li>Add your people under <em>Users &amp; Roles</em>. Each gets their own"
+            " invitation and a private home folder.</li>"
+            "<li>Your files are also reachable as a network drive (WebDAV) at"
+            " {{drive_host}}, using a key you create under your profile.</li>"
+            "</ol>"
+            "<p>If you did not expect this message, you can ignore it; nothing"
+            " changes until someone signs in.</p>"
         ),
     ),
 }

@@ -91,3 +91,48 @@ def test_replicated_write_during_cooldown_raises_master_unavailable():
     c._breaker.trip()
     with pytest.raises(MasterUnavailable):
         c._endpoints(write=True)   # writes never fall back to a replica
+
+
+def test_dn_under():
+    from ldap_manager.ldap_client import _dn_under
+
+    base = "ou=people,dc=x,dc=y"
+    assert _dn_under("uid=bob,ou=people,dc=x,dc=y", base)
+    assert _dn_under("UID=bob, OU=People,DC=x,DC=y", base)
+    assert not _dn_under("uid=svc-csai,ou=services,dc=x,dc=y", base)
+    assert not _dn_under(base, base)
+    assert not _dn_under("uid=bob,ou=people,dc=other,dc=y", base)
+
+
+def test_roster_leaves_out_service_accounts_but_keeps_orphaned_users():
+    # LoqSmyth, 2026-10-12: the tenant's file_services group carries the four
+    # svc-* workers (ou=services), which showed in Users as orphaned stubs.
+    from contextlib import contextmanager
+
+    class _Attr:
+        def __init__(self, v):
+            self.value, self.values = v, v if isinstance(v, list) else [v]
+
+    class _Entry(dict):
+        def __getitem__(self, k):
+            return _Attr(dict.__getitem__(self, k))
+
+    class _Conn:
+        entries = [
+            _Entry(cn="administrators", member=["uid=james,ou=people,dc=x,dc=y"]),
+            _Entry(cn="file_services", member=[
+                "uid=svc-csai,ou=services,dc=x,dc=y",
+                "uid=svc-difference,ou=services,dc=x,dc=y"]),
+            _Entry(cn="editors", member=["uid=gone@x,ou=people,dc=x,dc=y"]),
+        ]
+
+        def search(self, *a, **k):
+            return True
+
+    c = _client()
+    c._session = contextmanager(lambda write: (yield _Conn()))
+    c._fetch_users = lambda conn, uids: {
+        "james": {"uid": "james", "email": "james@x", "display_name": "James", "dn": "uid=james,ou=people,dc=x,dc=y"}}
+    roster = {u["uid"]: u for u in c.list_tenant_users("loqsmyth")}
+    assert set(roster) == {"james", "gone@x"}
+    assert roster["gone@x"]["orphaned"] and not roster["james"]["orphaned"]

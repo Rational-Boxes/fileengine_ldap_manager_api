@@ -323,6 +323,12 @@ class LdapClient:
         A member DN with no matching entry (a user deleted out from under the
         group) is kept as a uid-only stub so it stays visible and removable
         instead of silently vanishing from the roster.
+
+        Only members under ``ldap_user_base`` are users. The background workers
+        (svc-*, in ``ou=services``) hold the tenant's file_services role and are
+        members of its group, but they are infrastructure, not people a tenant
+        administrator manages — and since their entries are not under the user
+        base they would otherwise appear as orphaned stubs.
         """
         with self._session(False) as c:
             c.search(self.tenant_dn(tenant), "(objectClass=groupOfNames)",
@@ -332,7 +338,7 @@ class LdapClient:
                 role = str(e["cn"].value)
                 members = list(e["member"].values) if "member" in e else []
                 for m in members:
-                    if self._is_placeholder(m):
+                    if self._is_placeholder(m) or not _dn_under(m, self.s.ldap_user_base):
                         continue
                     roles_by_uid.setdefault(_uid_from_dn(m), []).append(role)
             entries = self._fetch_users(c, list(roles_by_uid))
@@ -439,3 +445,10 @@ def _tenant_from_role_dn(dn: str) -> str:
 
 def _dn_eq(a: str, b: str) -> bool:
     return (a or "").strip().lower() == (b or "").strip().lower()
+
+
+def _dn_under(dn: str, base: str) -> bool:
+    """Whether ``dn`` is an entry strictly below ``base`` (RDN-wise, case-insensitive)."""
+    norm = lambda d: [r.strip().lower().replace(" ", "") for r in _split_dn(d or "")]
+    child, parent = norm(dn), norm(base)
+    return bool(parent) and len(child) > len(parent) and child[-len(parent):] == parent
