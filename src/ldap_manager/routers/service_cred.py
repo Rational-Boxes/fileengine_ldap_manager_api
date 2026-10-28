@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""Backend-generated service credentials for the WebDAV / MCP doors (PROPOSAL
+"""Backend-generated service credentials for the WebDAV / MCP / BCF / REST doors (PROPOSAL
 §15/§16).
 
 Two surfaces, mirroring the 2FA router:
@@ -22,7 +22,8 @@ Two surfaces, mirroring the 2FA router:
     to the caller). The secret is returned **once**, at create/rotate.
   * internal ``/internal/service-cred/verify`` — the server-to-server API the
     WebDAV bridge and MCP door call to authenticate a presented ``key:secret``,
-    guarded by a shared secret (``SERVICE_CRED_INTERNAL_SECRET`` / ``MFA_INTERNAL_SECRET``).
+    and ``/internal/service-cred/status`` — the REST door's refresh-time check
+    that a key-minted session's credential is still live; both guarded by a shared secret (``SERVICE_CRED_INTERNAL_SECRET`` / ``MFA_INTERNAL_SECRET``).
 
 There is intentionally **no endpoint to read a secret back**: a lost secret is
 resolved by ``rotate``, not retrieval.
@@ -54,7 +55,7 @@ def _store(svc: Services) -> sc.ServiceCredentialStore:
 
 class CreateIn(BaseModel):
     label: str | None = None
-    scopes: list[str] | None = None   # subset of {webdav, mcp}; default webdav
+    scopes: list[str] | None = None   # subset of {webdav, mcp, bcf, api}; default webdav
 
 
 class RotateIn(BaseModel):
@@ -131,18 +132,43 @@ class VerifyIn(BaseModel):
     key_id: str
     secret: str
     tenant: str
-    scope: str                      # "webdav" | "mcp"
+    scope: str                      # "webdav" | "mcp" | "bcf" | "api"
     source_ip: str | None = None    # for the optional per-key IP allowlist (§16.5)
 
 
 @router.post("/internal/service-cred/verify")
 def internal_verify(body: VerifyIn, svc: Services = Depends(services),
                     _: None = Depends(require_internal)) -> dict:
-    uid = _store(svc).verify(key_id=body.key_id, secret=body.secret, tenant=body.tenant,
-                             scope=body.scope, source_ip=body.source_ip)
-    if uid is None:
+    out = _store(svc).authenticate(key_id=body.key_id, secret=body.secret, tenant=body.tenant,
+                                   scope=body.scope, source_ip=body.source_ip)
+    if out is None:
         raise HTTPException(status_code=401, detail="invalid credential")
-    return {"uid": uid, "tenant": body.tenant}
+    uid, generation = out
+    # `generation` is additive: the WebDAV/MCP doors ignore it; the REST door stamps
+    # it into the session it mints so refresh can tell a rotated secret.
+    return {"uid": uid, "tenant": body.tenant, "generation": generation}
+
+
+class StatusIn(BaseModel):
+    key_id: str
+    tenant: str
+    scope: str
+    source_ip: str | None = None
+
+
+@router.post("/internal/service-cred/status")
+def internal_status(body: StatusIn, svc: Services = Depends(services),
+                    _: None = Depends(require_internal)) -> dict:
+    """Liveness of a credential WITHOUT its secret, for the REST door's refresh of a
+    session that was minted from it. 401 for anything that would no longer verify
+    (revoked, expired, wrong tenant/scope, IP pin); the caller also compares the
+    generation, which changes on rotation."""
+    out = _store(svc).status(key_id=body.key_id, tenant=body.tenant, scope=body.scope,
+                             source_ip=body.source_ip)
+    if out is None:
+        raise HTTPException(status_code=401, detail="credential no longer valid")
+    uid, generation = out
+    return {"uid": uid, "tenant": body.tenant, "generation": generation}
 
 
 # ------------------------- per-tenant WebDAV session TTL (§14.10) -------------

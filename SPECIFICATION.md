@@ -133,7 +133,7 @@ Scoped to their own `ou=<tenant>`:
 - **Removing a user (decision) — from this tenant only.** A tenant admin removes a
   user *from their own tenant*: `DELETE /v1/admin/users/{uid}` drops every role the
   user holds here (so they lose all access to this tenant) and **purges their
-  tenant-bound door keys** — the WebDAV/MCP/BCF/CMIS `key:secret` service
+  tenant-bound door keys** — the WebDAV/MCP/BCF/CMIS/REST-API `key:secret` service
   credentials issued for this tenant, which must not outlive membership of it
   (they are verified against a single tenant, so a key here is useless once the
   roles are gone, and it is revoked rather than left dangling). Untouched: the

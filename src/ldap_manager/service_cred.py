@@ -14,13 +14,13 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 """Backend-generated service credentials (``key:secret``) for the non-interactive
-doors — WebDAV and MCP (PROPOSAL §15/§16).
+doors — WebDAV, MCP, BCF and the REST API (PROPOSAL §15/§16).
 
 The identity service owns the store: a 256-bit secret is generated here, shown to
 the user exactly **once**, and persisted only as ``HMAC-SHA256(secret, pepper)`` —
 never recoverable. A credential is a pure relational-DB record (Postgres), **never
 LDAP**; LDAP stays the authority for identity + roles only. Each credential carries
-a **scope set** (``webdav`` and/or ``mcp``) so a key is valid only on the door(s) it
+a **scope set** (``webdav``, ``mcp``, ``bcf``, ``api``) so a key is valid only on the door(s) it
 lists (least privilege), an optional label, optional expiry, and an optional
 per-key IP allowlist for pinning agent keys (§16.5).
 
@@ -46,7 +46,10 @@ except Exception:  # pragma: no cover
 # The doors a credential may be scoped to. The scope set is the authoritative
 # control; the key_id prefix (below) is cosmetic (aids secret scanning). "bcf" is
 # the BCF-API 2.1 door — a non-interactive gateway credential for BCF-XML sync.
-ALL_SCOPES = ("webdav", "mcp", "bcf")
+# "api" is the REST door (http_bridge): the key is exchanged once at
+# ``POST /v1/auth/token`` for an ordinary session bearer, renewed by refresh only
+# while the credential stays live (:meth:`ServiceCredentialStore.status`).
+ALL_SCOPES = ("webdav", "mcp", "bcf", "api")
 
 # Distinctive prefixes so leaked-credential scanners can flag exposure. The key_id
 # (public) rides in the Basic username; the secret (never stored in plaintext) is
@@ -82,6 +85,17 @@ def hash_secret(pepper: str, secret: str) -> bytes:
 
 def secret_matches(pepper: str, secret: str, stored_hash: bytes) -> bool:
     return hmac.compare_digest(hash_secret(pepper, secret), bytes(stored_hash))
+
+
+def secret_generation(stored_hash: bytes) -> str:
+    """A short, non-reversible tag for the CURRENT secret of a credential.
+
+    A session minted from a key carries it; refresh compares it with the stored
+    one. Rotating in place keeps the key_id but changes the hash, so without this
+    a session minted from the old secret could be refreshed forever after the
+    rotation that was meant to end it. Derived from the stored MAC (never the
+    secret), so it reveals nothing a DB read would not."""
+    return hashlib.sha256(b"fesk-generation:" + bytes(stored_hash)).hexdigest()[:16]
 
 
 @dataclass
@@ -236,6 +250,29 @@ class ServiceCredentialStore:
         iff the key exists, the secret matches, the key is scoped to ``scope`` and
         bound to ``tenant``, isn't expired, and (if an IP allowlist is set) the
         source IP is permitted. Best-effort ``last_used_at`` bump on success."""
+        out = self.authenticate(key_id=key_id, secret=secret, tenant=tenant,
+                                scope=scope, source_ip=source_ip)
+        return out[0] if out else None
+
+    def authenticate(self, *, key_id: str, secret: str, tenant: str, scope: str,
+                     source_ip: Optional[str] = None) -> Optional[tuple[str, str]]:
+        """:meth:`verify`, also returning the secret's generation tag
+        (:func:`secret_generation`) — ``(uid, generation)`` or None."""
+        return self._check(key_id=key_id, secret=secret, tenant=tenant, scope=scope,
+                           source_ip=source_ip)
+
+    def status(self, *, key_id: str, tenant: str, scope: str,
+               source_ip: Optional[str] = None) -> Optional[tuple[str, str]]:
+        """Is the credential STILL good, without presenting its secret? The REST
+        door asks this on every refresh of a session minted from the key, and
+        compares the generation it gets back with the one in the session — so a
+        revoke, an expiry, a scope or tenant change, an IP-pin miss or a rotation
+        ends the session at its next refresh. ``(uid, generation)`` or None."""
+        return self._check(key_id=key_id, secret=None, tenant=tenant, scope=scope,
+                           source_ip=source_ip)
+
+    def _check(self, *, key_id: str, secret: Optional[str], tenant: str, scope: str,
+               source_ip: Optional[str]) -> Optional[tuple[str, str]]:
         if scope not in ALL_SCOPES:
             return None
         with self._connect() as conn, conn.cursor() as cur:
@@ -251,15 +288,15 @@ class ServiceCredentialStore:
             uid, stored_hash, scopes, allowed_cidrs = row
             if scope not in (scopes or []):
                 return None
-            if not secret_matches(self.s.service_cred_pepper, secret, stored_hash):
+            if secret is not None and not secret_matches(self.s.service_cred_pepper, secret,
+                                                         stored_hash):
                 return None
             if allowed_cidrs and not _ip_in_cidrs(source_ip, list(allowed_cidrs)):
                 return None
             cur.execute("UPDATE service_credential SET last_used_at=now() WHERE key_id=%s",
                         (key_id,))
             conn.commit()
-        return uid
-
+        return uid, secret_generation(stored_hash)
 
 def _ip_in_cidrs(ip: Optional[str], cidrs: list[str]) -> bool:
     """True if ``ip`` falls within any CIDR in ``cidrs``. Missing IP or an
