@@ -258,8 +258,9 @@ class ServiceCredentialStore:
                      source_ip: Optional[str] = None) -> Optional[tuple[str, str]]:
         """:meth:`verify`, also returning the secret's generation tag
         (:func:`secret_generation`) — ``(uid, generation)`` or None."""
-        return self._check(key_id=key_id, secret=secret, tenant=tenant, scope=scope,
-                           source_ip=source_ip)
+        out = self.check(key_id=key_id, secret=secret, tenant=tenant, scope=scope,
+                         source_ip=source_ip)
+        return (out.uid, out.generation) if out else None
 
     def status(self, *, key_id: str, tenant: str, scope: str,
                source_ip: Optional[str] = None) -> Optional[tuple[str, str]]:
@@ -268,16 +269,21 @@ class ServiceCredentialStore:
         compares the generation it gets back with the one in the session — so a
         revoke, an expiry, a scope or tenant change, an IP-pin miss or a rotation
         ends the session at its next refresh. ``(uid, generation)`` or None."""
-        return self._check(key_id=key_id, secret=None, tenant=tenant, scope=scope,
-                           source_ip=source_ip)
+        out = self.check(key_id=key_id, secret=None, tenant=tenant, scope=scope,
+                         source_ip=source_ip)
+        return (out.uid, out.generation) if out else None
 
-    def _check(self, *, key_id: str, secret: Optional[str], tenant: str, scope: str,
-               source_ip: Optional[str]) -> Optional[tuple[str, str]]:
+    def check(self, *, key_id: str, secret: Optional[str], tenant: str, scope: str,
+              source_ip: Optional[str] = None) -> Optional["KeyCheck"]:
+        """The one rule behind :meth:`authenticate` (``secret`` given) and
+        :meth:`status` (``secret=None``), returning the key's label as well, so
+        the internal API can tell the REST door what the user named the key
+        (headless csai runs are listed under it)."""
         if scope not in ALL_SCOPES:
             return None
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT uid, secret_hash, scopes, allowed_cidrs "
+                "SELECT uid, secret_hash, scopes, allowed_cidrs, label "
                 "FROM service_credential "
                 "WHERE key_id=%s AND tenant=%s AND revoked_at IS NULL "
                 "AND (expires_at IS NULL OR expires_at > now())",
@@ -285,7 +291,7 @@ class ServiceCredentialStore:
             row = cur.fetchone()
             if row is None:
                 return None
-            uid, stored_hash, scopes, allowed_cidrs = row
+            uid, stored_hash, scopes, allowed_cidrs, label = row
             if scope not in (scopes or []):
                 return None
             if secret is not None and not secret_matches(self.s.service_cred_pepper, secret,
@@ -296,7 +302,17 @@ class ServiceCredentialStore:
             cur.execute("UPDATE service_credential SET last_used_at=now() WHERE key_id=%s",
                         (key_id,))
             conn.commit()
-        return uid, secret_generation(stored_hash)
+        return KeyCheck(uid=uid, generation=secret_generation(stored_hash), label=label or "")
+
+
+@dataclass(frozen=True)
+class KeyCheck:
+    """A credential that verified: whose it is, its secret's generation tag, and
+    the label its owner gave it ("" when none)."""
+    uid: str
+    generation: str
+    label: str
+
 
 def _ip_in_cidrs(ip: Optional[str], cidrs: list[str]) -> bool:
     """True if ``ip`` falls within any CIDR in ``cidrs``. Missing IP or an

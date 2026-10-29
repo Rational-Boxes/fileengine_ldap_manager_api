@@ -76,8 +76,8 @@ def _client(row):
     return TestClient(app), box
 
 
-def _row(secret, scopes=("api",), cidrs=()):
-    return ("alice", sc.hash_secret(PEPPER, secret), list(scopes), list(cidrs))
+def _row(secret, scopes=("api",), cidrs=(), label="Reviera — office laptop"):
+    return ("alice", sc.hash_secret(PEPPER, secret), list(scopes), list(cidrs), label)
 
 
 H = {"X-Internal-Auth": INTERNAL}
@@ -108,7 +108,8 @@ def test_status_needs_no_secret_and_agrees_on_generation():
     v = c.post("/internal/service-cred/verify", json={**BODY, "secret": secret}, headers=H).json()
     s = c.post("/internal/service-cred/status", json=BODY, headers=H)
     assert s.status_code == 200
-    assert s.json() == {"uid": "alice", "tenant": "default", "generation": v["generation"]}
+    assert s.json() == {"uid": "alice", "tenant": "default", "generation": v["generation"],
+                        "label": "Reviera — office laptop"}
 
 
 def test_status_generation_moves_when_the_secret_is_regenerated():
@@ -135,3 +136,14 @@ def test_internal_api_refuses_callers_without_the_internal_secret():
         body = BODY if path.endswith("status") else {**BODY, "secret": "x"}
         assert c.post(path, json=body).status_code == 403
         assert c.post(path, json=body, headers={"X-Internal-Auth": "nope"}).status_code == 403
+
+
+def test_verify_and_status_return_the_keys_label():
+    # The REST door stamps it into the key session; csai lists headless runs
+    # under it. A key with no label answers "" rather than null.
+    secret = sc.generate_secret()
+    c, box = _client(_row(secret))
+    assert c.post("/internal/service-cred/verify", json={**BODY, "secret": secret},
+                  headers=H).json()["label"] == "Reviera — office laptop"
+    box["row"] = _row(secret, label=None)
+    assert c.post("/internal/service-cred/status", json=BODY, headers=H).json()["label"] == ""

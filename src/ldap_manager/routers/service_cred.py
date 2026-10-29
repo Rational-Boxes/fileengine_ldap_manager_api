@@ -139,14 +139,17 @@ class VerifyIn(BaseModel):
 @router.post("/internal/service-cred/verify")
 def internal_verify(body: VerifyIn, svc: Services = Depends(services),
                     _: None = Depends(require_internal)) -> dict:
-    out = _store(svc).authenticate(key_id=body.key_id, secret=body.secret, tenant=body.tenant,
-                                   scope=body.scope, source_ip=body.source_ip)
+    if not body.secret:
+        raise HTTPException(status_code=401, detail="invalid credential")
+    out = _store(svc).check(key_id=body.key_id, secret=body.secret, tenant=body.tenant,
+                            scope=body.scope, source_ip=body.source_ip)
     if out is None:
         raise HTTPException(status_code=401, detail="invalid credential")
-    uid, generation = out
-    # `generation` is additive: the WebDAV/MCP doors ignore it; the REST door stamps
-    # it into the session it mints so refresh can tell a rotated secret.
-    return {"uid": uid, "tenant": body.tenant, "generation": generation}
+    # `generation` and `label` are additive: the WebDAV/MCP doors ignore them; the
+    # REST door stamps both into the session it mints (refresh compares the
+    # generation; csai lists headless runs under the label).
+    return {"uid": out.uid, "tenant": body.tenant, "generation": out.generation,
+            "label": out.label}
 
 
 class StatusIn(BaseModel):
@@ -163,12 +166,12 @@ def internal_status(body: StatusIn, svc: Services = Depends(services),
     session that was minted from it. 401 for anything that would no longer verify
     (revoked, expired, wrong tenant/scope, IP pin); the caller also compares the
     generation, which changes on rotation."""
-    out = _store(svc).status(key_id=body.key_id, tenant=body.tenant, scope=body.scope,
-                             source_ip=body.source_ip)
+    out = _store(svc).check(key_id=body.key_id, secret=None, tenant=body.tenant,
+                            scope=body.scope, source_ip=body.source_ip)
     if out is None:
         raise HTTPException(status_code=401, detail="credential no longer valid")
-    uid, generation = out
-    return {"uid": uid, "tenant": body.tenant, "generation": generation}
+    return {"uid": out.uid, "tenant": body.tenant, "generation": out.generation,
+            "label": out.label}
 
 
 # ------------------------- per-tenant WebDAV session TTL (§14.10) -------------
