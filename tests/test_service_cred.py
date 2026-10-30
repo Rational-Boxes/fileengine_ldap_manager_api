@@ -130,7 +130,7 @@ def test_status_and_authenticate_share_one_rule():
     secret = sc.generate_secret()
     blob = sc.hash_secret("pepper-abc", secret)
     gen = sc.secret_generation(blob)
-    store, cur = _store_with(("alice", blob, ["api"], []))
+    store, cur = _store_with(("alice", blob, ["api"], [], "laptop"))
     assert store.authenticate(key_id="k", secret=secret, tenant="t", scope="api") == ("alice", gen)
     assert store.authenticate(key_id="k", secret=secret + "x", tenant="t", scope="api") is None
     # status needs no secret, and agrees on the generation
@@ -144,6 +144,6 @@ def test_status_refuses_a_missing_or_pinned_out_key():
     blob = sc.hash_secret("pepper-abc", sc.generate_secret())
     store, _ = _store_with(None)                     # revoked / expired / other tenant
     assert store.status(key_id="k", tenant="t", scope="api") is None
-    store, _ = _store_with(("alice", blob, ["api"], ["10.0.0.0/8"]))
+    store, _ = _store_with(("alice", blob, ["api"], ["10.0.0.0/8"], "laptop"))
     assert store.status(key_id="k", tenant="t", scope="api", source_ip="192.0.2.1") is None
     assert store.status(key_id="k", tenant="t", scope="api", source_ip="10.1.2.3") is not None
